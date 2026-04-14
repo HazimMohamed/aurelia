@@ -1,0 +1,17 @@
+[Unit]
+Description=Aurelia Finance Agent Daemon
+After=network.target aurelia-server.service
+Requires=aurelia-server.service
+
+[Service]
+User=finance
+Group=finance
+ExecStart=/bin/bash /home/zuzu/Code/aurelia/scripts/agent_daemon.sh finance http://localhost:8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aurelia-finance
+
+[Install]
+WantedBy=multi-user.target

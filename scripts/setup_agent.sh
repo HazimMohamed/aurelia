@@ -61,17 +61,45 @@ setup_var_aurelia() {
         scheduler/pending \
         scheduler/completed \
         scheduler/failed \
-        dashboard/queue
+        dashboard/queue \
+        queue \
+        logs \
+        pids
 
-    # Global config
-    write_file /var/aurelia/config.json '{
+    # Global config — generate agent tokens and janitor scheduler_token if missing
+    if [[ ! -f /var/aurelia/config.json ]]; then
+        # Generate per-agent tokens and janitor token
+        JANITOR_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        PERSONAL_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        COOKING_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        FINANCE_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        MAYOR_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+        JANITOR_AGENT_TOKEN=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+
+        cat > /var/aurelia/config.json << CONFIGEOF
+{
     "defaults": {
         "model": "claude-sonnet-4-6",
         "bardo": {
             "model": "claude-sonnet-4-6"
         }
+    },
+    "janitor": {
+        "scheduler_token": "${JANITOR_TOKEN}"
+    },
+    "agents": {
+        "personal": {"token": "${PERSONAL_TOKEN}"},
+        "cooking": {"token": "${COOKING_TOKEN}"},
+        "finance": {"token": "${FINANCE_TOKEN}"},
+        "mayor": {"token": "${MAYOR_TOKEN}"},
+        "janitor": {"token": "${JANITOR_AGENT_TOKEN}"}
     }
-}'
+}
+CONFIGEOF
+        log "  wrote /var/aurelia/config.json with generated tokens"
+    else
+        log "  skipped (exists) /var/aurelia/config.json"
+    fi
 
     # Shared introduction file
     write_file /var/aurelia/shared/hazim_introduction.md '# Hazim (God-lite)
@@ -155,6 +183,25 @@ setup_agent() {
 
     # Write identity files
     write_identity "$agent" "$home"
+
+    # Create FIFO queue for agent
+    local fifo="/var/aurelia/queue/${agent}"
+    if [[ ! -p "$fifo" ]]; then
+        mkfifo "$fifo"
+        log "  created FIFO ${fifo}"
+    else
+        log "  skipped (exists) ${fifo}"
+    fi
+    # chown aurelia:$agent and chmod 620 (aurelia writes, agent reads, others nothing)
+    # In WSL without the users: skip chown, use 666 for dev convenience
+    if id "$agent" &>/dev/null && id "aurelia" &>/dev/null; then
+        chown aurelia:"${agent}" "$fifo" 2>/dev/null || true
+        chmod 620 "$fifo" 2>/dev/null || true
+        log "  FIFO owned by aurelia:${agent}, chmod 620"
+    else
+        chmod 666 "$fifo" 2>/dev/null || true
+        log "  WARNING: users 'aurelia' and/or '${agent}' do not exist, FIFO is world-rw (dev mode)"
+    fi
 
     # Set ownership
     if id "$agent" &>/dev/null; then

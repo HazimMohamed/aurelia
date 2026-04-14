@@ -72,6 +72,46 @@ def write_assistant_message(transcript_path: Path, content: str, cycle: int) -> 
     )
 
 
+def write_tool_call(
+    transcript_path: Path,
+    tool_name: str,
+    tool_input: dict,
+    tool_use_id: str,
+    cycle: int,
+) -> None:
+    import json
+    append_entry(
+        transcript_path,
+        {
+            "ts": _now_iso(),
+            "type": "tool_call",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_use_id": tool_use_id,
+            "cycle": cycle,
+        },
+    )
+
+
+def write_tool_result(
+    transcript_path: Path,
+    tool_use_id: str,
+    result: Any,
+    cycle: int,
+) -> None:
+    import json
+    append_entry(
+        transcript_path,
+        {
+            "ts": _now_iso(),
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "result": result,
+            "cycle": cycle,
+        },
+    )
+
+
 def write_bardo_complete(transcript_path: Path, incarnation_name: str, cycle: int) -> None:
     append_entry(
         transcript_path,

@@ -1,0 +1,17 @@
+[Unit]
+Description=Aurelia Scheduler Daemon
+After=network.target aurelia-server.service
+Requires=aurelia-server.service
+
+[Service]
+User=aurelia
+Group=aurelia
+ExecStart=/bin/bash /home/zuzu/Code/aurelia/scripts/scheduler_daemon.sh http://localhost:8000
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aurelia-scheduler
+
+[Install]
+WantedBy=multi-user.target

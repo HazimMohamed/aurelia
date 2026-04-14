@@ -1,0 +1,17 @@
+[Unit]
+Description=Aurelia Cooking Agent Daemon
+After=network.target aurelia-server.service
+Requires=aurelia-server.service
+
+[Service]
+User=cooking
+Group=cooking
+ExecStart=/bin/bash /home/zuzu/Code/aurelia/scripts/agent_daemon.sh cooking http://localhost:8000
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aurelia-cooking
+
+[Install]
+WantedBy=multi-user.target
