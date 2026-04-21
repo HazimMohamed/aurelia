@@ -405,6 +405,49 @@ def get_active(agent: str) -> Optional[str]:
     return get_active_incarnation(config)
 
 
+def process_scheduled_item(item: dict) -> dict:
+    """
+    Process a scheduled item directly — called by the scheduler thread inside the runtime daemon.
+    Routes to the correct hook handler based on item type.
+    """
+    from .hooks import HookType
+    agent = item.get("agent")
+    item_type = item.get("type", "scheduled_task")
+    payload = item.get("payload") or {}
+    payload["goal"] = item.get("goal", "")
+    payload["rebirth_from"] = item.get("rebirth_from")
+
+    if item_type == "bardo_check":
+        from .bardo import check_bardo_timeouts
+        _registry = get_registry()
+        triggered = check_bardo_timeouts(_registry)
+        return {"status": "ok", "triggered": triggered}
+
+    if item_type == "budget_reset":
+        from .budget import reset_all_budgets
+        reset_all_budgets()
+        return {"status": "ok", "action": "budget_reset"}
+
+    if item_type == "heartbeat":
+        hook = HookType.HEARTBEAT
+    elif item_type == "agent_invite":
+        hook = HookType.AGENT_INVITE
+    else:
+        hook = HookType.SCHEDULED_TASK
+
+    config = _require_config(agent)
+    from .hooks import heartbeat_precheck
+    if hook == HookType.HEARTBEAT and not heartbeat_precheck(config):
+        return {"status": "skipped", "reason": "precheck_false", "agent": agent}
+
+    incarnations = list_incarnations(agent)
+    active = next((i for i in incarnations if i.status == "active"), None)
+    if not active:
+        active = spawn(agent, goal=payload.get("goal"))
+
+    return dispatch(agent, active.name, hook, payload).__dict__
+
+
 def trigger_bardo(agent: str, incarnation: str) -> dict:
     """Trigger bardo for a specific incarnation. Returns bardo result dict."""
     config = _require_config(agent)

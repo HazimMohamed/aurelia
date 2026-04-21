@@ -250,20 +250,15 @@ def count_pending_for_agent(agent_name: str) -> int:
 
 
 class SchedulerDaemon:
-    """Background scheduler that fires due items."""
+    """Background scheduler that fires due items. Runs as a thread inside the runtime daemon."""
 
-    def __init__(self, api_url: str = "http://localhost:8000") -> None:
-        self.api_url = api_url
+    def __init__(self) -> None:
         self._running = False
 
     def run(self) -> None:
-        """Main daemon loop — runs forever, checking every SCHEDULER_CHECK_INTERVAL seconds."""
         import time
-        import httpx
-
         self._running = True
-        print(f"[scheduler] Daemon started. Check interval: {SCHEDULER_CHECK_INTERVAL}s")
-
+        print(f"[scheduler] Started. Check interval: {SCHEDULER_CHECK_INTERVAL}s")
         while self._running:
             try:
                 self._tick()
@@ -272,42 +267,25 @@ class SchedulerDaemon:
             time.sleep(SCHEDULER_CHECK_INTERVAL)
 
     def _tick(self) -> None:
-        """One scheduler tick: find due items and fire them."""
-        import httpx
-
         now = datetime.now(timezone.utc)
-        items = load_pending_items()
-
-        for item in items:
+        for item in load_pending_items():
             try:
-                trigger = datetime.fromisoformat(
-                    item.trigger_time.replace("Z", "+00:00")
-                )
+                trigger = datetime.fromisoformat(item.trigger_time.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
                 continue
-
             if trigger <= now:
                 self._fire_item(item, now)
 
     def _fire_item(self, item: ScheduledItem, now: datetime) -> None:
-        """Fire a scheduled item via the internal API."""
-        import httpx
-
+        """Fire a scheduled item by calling runtime directly — no HTTP hop needed."""
+        from . import runtime as _runtime
         try:
-            response = httpx.post(
-                f"{self.api_url}/internal/process",
-                json=item.to_dict(),
-                timeout=300.0,  # agent cycles can be slow
-            )
-            if response.status_code == 200:
-                print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})")
-                if item.recurring:
-                    reschedule(item, now)
-                else:
-                    move_to_completed(item)
+            _runtime.process_scheduled_item(item.to_dict())
+            print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})")
+            if item.recurring:
+                reschedule(item, now)
             else:
-                print(f"[scheduler] Failed {item.id}: HTTP {response.status_code}")
-                move_to_failed(item, f"HTTP {response.status_code}: {response.text[:200]}")
+                move_to_completed(item)
         except Exception as e:
             print(f"[scheduler] Exception firing {item.id}: {e}")
             move_to_failed(item, str(e))

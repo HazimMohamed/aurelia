@@ -351,6 +351,14 @@ class RuntimeDaemon:
 
 def main() -> None:
     log.info(f"[runtime_daemon] Starting (pid={os.getpid()}, uid={os.getuid()})")
+
+    # Start scheduler as a background thread — same process, no IPC needed
+    from .scheduler import SchedulerDaemon
+    scheduler = SchedulerDaemon()
+    scheduler_thread = threading.Thread(target=scheduler.run, daemon=True, name="scheduler")
+    scheduler_thread.start()
+    log.info("[runtime_daemon] Scheduler thread started")
+
     daemon = RuntimeDaemon()
     daemon.run()
 
