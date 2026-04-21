@@ -25,6 +25,7 @@ ALLOWED_TYPES = {
     "episodic_reindex",
     "scheduled_task",
     "agent_invite",
+    "budget_reset",
 }
 
 JANITOR_ONLY_TYPES = {

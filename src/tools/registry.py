@@ -65,6 +65,12 @@ def build_tool_registry(
         register_comms_tools(registry, agent_config, incarnation_state, api_url)
 
     # Agent-specific tools
-    register_agent_tools(registry, agent_name)
+    register_agent_tools(
+        registry,
+        agent_name,
+        agent_config=agent_config,
+        incarnation_state=incarnation_state,
+        api_url=api_url,
+    )
 
     return registry

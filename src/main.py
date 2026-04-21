@@ -1,4 +1,4 @@
-"""Aurelia Milestone 2 — FastAPI server."""
+"""Aurelia Milestone 3 — FastAPI server."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ from .scheduler import (
 from .context import load_recent_episodic_summary, load_episodic_extended
 from .incarnation import get_active_incarnation
 
-app = FastAPI(title="Aurelia", version="0.2.0")
+app = FastAPI(title="Aurelia", version="0.3.0")
 
 # Global registry — initialized once on startup
 registry = AgentRegistry()
@@ -251,16 +251,33 @@ def post_bardo(agent_name: str) -> BardoResponse:
 
 @app.get("/health")
 def get_health() -> dict:
-    """Return health status for all known agents, including scheduler queue depth."""
+    """Return health status for all known agents, including budget remaining."""
+    from .budget import get_budget_remaining, load_budget
+
     agents = {}
     for agent_name in registry.all_agents():
+        config = registry.get(agent_name)
         status = registry.agent_status(agent_name)
         status["scheduler_queue"] = count_pending_for_agent(agent_name)
+
+        if config:
+            budget_data = load_budget(agent_name)
+            status["budget_remaining"] = get_budget_remaining(config)
+            status["budget_status"] = budget_data.get("status", "active")
+            status["tokens_used_this_week"] = budget_data.get("tokens_used", 0)
+            status["weekly_budget"] = config.weekly_budget_tokens
+
         agents[agent_name] = status
+
+    # Count dashboard queue
+    from pathlib import Path
+    dashboard_queue = Path("/var/aurelia/dashboard/queue")
+    pending_dashboard = len(list(dashboard_queue.glob("*.json"))) if dashboard_queue.exists() else 0
 
     return {
         "status": "healthy",
         "agents": agents,
+        "pending_dashboard": pending_dashboard,
     }
 
 
@@ -485,6 +502,127 @@ def get_scheduler_pending(agent: Optional[str] = None) -> dict:
         "pending": [i.to_dict() for i in items],
         "count": len(items),
     }
+
+
+# ── Admin endpoints ────────────────────────────────────────────────────────────
+
+class UndissolveRequest(BaseModel):
+    agent: str
+    incarnation: str
+
+
+class BudgetOverrideRequest(BaseModel):
+    agent: str
+    additional_tokens: int = 100_000
+
+
+@app.post("/admin/undissolve")
+def admin_undissolve(req: UndissolveRequest) -> dict:
+    """
+    Restore a dissolved incarnation from Akashic records.
+    Recreates the karma folder, transcript, and current symlink.
+    """
+    config = registry.get(req.agent)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found.")
+
+    akasha_path = config.akasha_dir / req.incarnation
+    if not akasha_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Incarnation '{req.incarnation}' not found in akasha.",
+        )
+
+    akasha_transcript = akasha_path / f"{req.incarnation}-transcript.jsonl"
+    if not akasha_transcript.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Transcript not found in akasha for '{req.incarnation}'.",
+        )
+
+    # Check if an active incarnation already exists
+    active = get_active_incarnation(config)
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Agent '{req.agent}' has active incarnation '{active}'. Bardo it first.",
+        )
+
+    try:
+        karma_path = config.karma_dir / req.incarnation
+        karma_path.mkdir(parents=True, exist_ok=True)
+
+        # Restore transcript
+        import shutil
+        transcript_path = karma_path / "transcript.jsonl"
+        shutil.copy2(akasha_transcript, transcript_path)
+
+        # Recreate scratch dir
+        (karma_path / "scratch").mkdir(exist_ok=True)
+
+        # Add undissolved marker to transcript
+        from .transcript import append_entry
+        from datetime import datetime, timezone
+        append_entry(transcript_path, {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "type": "undissolved",
+            "incarnation": req.incarnation,
+            "note": "Incarnation restored by God-lite",
+        })
+
+        # Update current symlink
+        symlink = config.current_symlink
+        if symlink.is_symlink() or symlink.exists():
+            symlink.unlink()
+        symlink.symlink_to(karma_path)
+
+        return {
+            "status": "restored",
+            "agent": req.agent,
+            "incarnation": req.incarnation,
+            "karma_path": str(karma_path),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Undissolve failed: {e}")
+
+
+@app.post("/admin/budget-override")
+def admin_budget_override(req: BudgetOverrideRequest) -> dict:
+    """Grant additional token budget to a paused agent."""
+    from .budget import resume_budget, load_budget
+
+    config = registry.get(req.agent)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found.")
+
+    before = load_budget(req.agent)
+    budget = resume_budget(req.agent, additional_tokens=req.additional_tokens)
+
+    return {
+        "status": "resumed",
+        "agent": req.agent,
+        "additional_tokens": req.additional_tokens,
+        "tokens_used_before": before.get("tokens_used", 0),
+        "tokens_used_after": budget.get("tokens_used", 0),
+        "weekly_budget": config.weekly_budget_tokens,
+        "budget_remaining": config.weekly_budget_tokens - budget.get("tokens_used", 0),
+    }
+
+
+@app.post("/admin/bardo-check")
+def admin_bardo_check() -> dict:
+    """Trigger bardo timeout check across all agents."""
+    from .bardo import check_bardo_timeouts
+    triggered = check_bardo_timeouts(registry)
+    return {"status": "checked", "triggered": triggered, "count": len(triggered)}
+
+
+@app.post("/admin/budget-reset")
+def admin_budget_reset() -> dict:
+    """Reset weekly budgets for all agents (Monday task)."""
+    from .budget import reset_weekly_budgets
+    reset = reset_weekly_budgets()
+    return {"status": "reset", "agents": reset}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

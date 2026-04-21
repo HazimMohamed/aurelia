@@ -18,7 +18,6 @@ class HookType(str, Enum):
 
 BULLETIN_PATH = Path("/var/aurelia/bulletin.jsonl")
 SCHEDULER_PENDING_DIR = Path("/var/aurelia/scheduler/pending")
-MINIMUM_BUDGET_THRESHOLD = 100  # placeholder; full budget tracking is M3+
 
 
 def count_bulletin_unread(agent: AgentConfig) -> int:
@@ -82,11 +81,22 @@ def count_scheduled_now(agent: AgentConfig) -> int:
 def heartbeat_precheck(agent: AgentConfig) -> bool:
     """
     Fast pre-check before doing a full LLM call for heartbeat.
-    Returns True if there is meaningful work to do.
+    Returns True if there is meaningful work to do and budget available.
     """
+    # Budget check — skip heartbeat if paused or below minimum threshold
+    try:
+        from .budget import get_budget_remaining, is_budget_ok
+        if not is_budget_ok(agent):
+            return False
+        remaining = get_budget_remaining(agent)
+        if remaining < 1_000:  # Below minimum threshold
+            return False
+    except Exception:
+        pass  # If budget check fails, allow heartbeat to proceed
+
     has_unread = count_bulletin_unread(agent) > 0
     has_scheduled = count_scheduled_now(agent) > 0
-    # Budget check placeholder — always has budget until M3 implements it
+    # Always allow heartbeat if there's budget (agents explore in free time)
     has_budget = True
     return has_unread or has_scheduled or has_budget
 

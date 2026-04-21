@@ -75,8 +75,8 @@ def run_agent_cycle(
     entries = incarnation_state["entries"]
     cycle = incarnation_state["cycle"] + 1
 
-    system_prompt = build_system_prompt(config)
-    messages = build_hook_messages(entries, human_content, hook_type)
+    system_prompt = build_system_prompt(config, hook_content=human_content)
+    messages = build_hook_messages(config, entries, human_content, hook_type)
 
     # Write human message to transcript now
     write_human_message(transcript_path, human_content, cycle, sender=sender)
@@ -91,7 +91,7 @@ def run_agent_cycle(
     if tool_registry:
         tool_registry._ctx_extras = {"tool_registry": tool_registry}
 
-    response_text = _run_with_tools(
+    response_text, total_tokens = _run_with_tools(
         client=client,
         config=config,
         messages=messages,
@@ -103,6 +103,19 @@ def run_agent_cycle(
     )
 
     write_assistant_message(transcript_path, response_text, cycle)
+
+    # Track token budget after cycle completes
+    if total_tokens > 0:
+        try:
+            from .budget import check_and_apply_budget
+            check_and_apply_budget(
+                config=config,
+                tokens_used=total_tokens,
+                incarnation_name=incarnation_state.get("name", ""),
+                task_in_progress=human_content[:100],
+            )
+        except Exception as e:
+            print(f"[core] Budget tracking error: {e}")
 
     # Update entries for future cycles
     incarnation_state["entries"] = incarnation_state["entries"] + [
@@ -122,9 +135,11 @@ def _run_with_tools(
     tool_registry: Any,
     transcript_path: Any,
     cycle: int,
-) -> str:
-    """Inner loop: call LLM, handle tool use, repeat until text response."""
+) -> tuple[str, int]:
+    """Inner loop: call LLM, handle tool use, repeat until text response.
+    Returns (response_text, total_tokens_used)."""
     tool_cycle = 0
+    total_tokens = 0
 
     while tool_cycle < MAX_TOOL_CYCLES:
         create_kwargs: dict[str, Any] = {
@@ -137,6 +152,13 @@ def _run_with_tools(
             create_kwargs["tools"] = tools
 
         response = client.messages.create(**create_kwargs)
+
+        # Accumulate token usage
+        if hasattr(response, "usage") and response.usage:
+            total_tokens += (
+                getattr(response.usage, "input_tokens", 0)
+                + getattr(response.usage, "output_tokens", 0)
+            )
 
         if response.stop_reason == "tool_use":
             # Process tool calls
@@ -172,9 +194,6 @@ def _run_with_tools(
 
                 tool_results.append(_build_tool_result_message(tool_use_id, result))
 
-                # Special: continue_task returns None — loop is handled by infrastructure
-                # The LLM gets the null result and can decide what to do next
-
             # Add tool results to messages
             messages = messages + [
                 {"role": "user", "content": tool_results}
@@ -185,10 +204,10 @@ def _run_with_tools(
 
         # stop_reason == "end_turn" (or "max_tokens") — extract text
         text_blocks = [b.text for b in response.content if hasattr(b, "text")]
-        return "\n".join(text_blocks) if text_blocks else ""
+        return "\n".join(text_blocks) if text_blocks else "", total_tokens
 
     # Safety: hit max tool cycles
-    return f"[Error: exceeded {MAX_TOOL_CYCLES} tool cycles without a text response]"
+    return f"[Error: exceeded {MAX_TOOL_CYCLES} tool cycles without a text response]", total_tokens
 
 
 def run_agent_cycle_and_parse(

@@ -1,9 +1,11 @@
-"""Bardo process: summarize transcript, archive to Akasha, clean karma."""
+"""Bardo process: summarize transcript, process memory flags, archive to Akasha, clean karma."""
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,6 @@ def _summarize_transcript(
     bardo_model: str,
 ) -> str:
     """Call Sonnet to summarize the incarnation transcript."""
-    # Build a readable version of the transcript for summarization
     lines = []
     for entry in entries:
         entry_type = entry.get("type", "")
@@ -42,6 +43,10 @@ def _summarize_transcript(
             lines.append(f"[{ts}] {agent_name.capitalize()}: {content}")
         elif entry_type == "incarnation_start":
             lines.append(f"[{ts}] --- Incarnation started: {incarnation_name} ---")
+        elif entry_type == "memory_flag":
+            lines.append(f"[{ts}] [MEMORY FLAG] tier={entry.get('tier')} importance={entry.get('importance')}: {content}")
+        elif entry_type == "agent_note":
+            lines.append(f"[{ts}] [NOTE] {content}")
 
     transcript_text = "\n".join(lines) if lines else "(empty incarnation)"
 
@@ -66,9 +71,7 @@ def _summarize_transcript(
 
     raw = response.content[0].text.strip()
 
-    # Try to extract JSON from the response
     try:
-        # Handle markdown code blocks
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
         elif "```" in raw:
@@ -76,22 +79,93 @@ def _summarize_transcript(
         parsed = json.loads(raw)
         return json.dumps(parsed)
     except (json.JSONDecodeError, IndexError):
-        # Return as plain text wrapped in JSON
         return json.dumps({"summary": raw, "topics": [], "insights": [], "tone": "unknown"})
+
+
+def _extract_semantic_insights(
+    agent_name: str,
+    incarnation_name: str,
+    entries: list[dict[str, Any]],
+    bardo_model: str,
+) -> list[dict[str, Any]]:
+    """
+    Use Sonnet to identify additional semantic insights from the transcript
+    that the agent didn't explicitly flag but that pass the six-month test.
+    Returns list of insight dicts.
+    """
+    lines = []
+    for entry in entries:
+        entry_type = entry.get("type", "")
+        content = entry.get("content", "")
+        ts = entry.get("ts", "")
+        if entry_type in ("human_message", "assistant_message"):
+            role = "Human" if entry_type == "human_message" else agent_name.capitalize()
+            lines.append(f"[{ts}] {role}: {content}")
+
+    transcript_text = "\n".join(lines) if lines else "(empty)"
+
+    if len(transcript_text) < 100:
+        return []
+
+    prompt = (
+        f"You are processing the bardo (memory consolidation) for agent '{agent_name}'.\n\n"
+        f"Read this conversation transcript and identify any insights about Hazim (God-lite) "
+        f"or the agent's domain that should be preserved as semantic memory.\n\n"
+        f"Apply the six-month test: only include things that would still be true and useful "
+        f"six months from now.\n\n"
+        f"Transcript:\n{transcript_text}\n\n"
+        f"Return a JSON array of objects, each with fields:\n"
+        f"  - content: the insight (string)\n"
+        f"  - importance: 'low', 'medium', or 'high'\n"
+        f"  - category: a short tag like 'preferences', 'patterns', 'facts' (string)\n\n"
+        f"Return an empty array [] if there are no insights worth preserving.\n"
+        f"Return only the JSON array, no other text."
+    )
+
+    client = anthropic.Anthropic()
+    try:
+        response = client.messages.create(
+            model=bardo_model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text.strip()
+        if "```json" in raw:
+            raw = raw.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw:
+            raw = raw.split("```")[1].split("```")[0].strip()
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception as e:
+        print(f"[bardo] Semantic insight extraction failed: {e}", file=sys.stderr)
+
+    return []
+
+
+def _set_permissions_safe(path: Path, mode: int) -> None:
+    """Set file permissions, gracefully failing if non-root."""
+    try:
+        os.chmod(path, mode)
+    except (PermissionError, OSError):
+        pass
 
 
 def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any]:
     """
-    Execute bardo for a completed incarnation:
+    Execute full bardo for a completed incarnation:
     1. Read transcript
-    2. Summarize with Sonnet
-    3. Write episodic record to ~/karma/episodic/extended/{incarnation_name}.jsonl
-    4. Copy transcript to ~/akasha/{incarnation_name}/{incarnation_name}-transcript.jsonl
-    5. Copy scratch to ~/akasha/{incarnation_name}/scratch/ if non-empty
-    6. Write bardo_complete to transcript
-    7. Clean karma incarnation folder
+    2. Summarize with Sonnet → write episodic/extended
+    3. Process memory_flag entries → write semantic (core or extended)
+    4. Extract additional semantic insights (bardo-initiated)
+    5. Copy transcript to ~/akasha/
+    6. Copy scratch to ~/akasha/ if non-empty
+    7. Write bardo_complete to transcript (before copy)
     8. Remove current symlink
+    9. Clean karma incarnation folder
     """
+    from .memory import write_semantic_core, write_semantic_extended
+
     incarnation_dir = agent_config.karma_dir / incarnation_name
     transcript_path = incarnation_dir / "transcript.jsonl"
     scratch_dir = incarnation_dir / "scratch"
@@ -107,7 +181,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     # Re-read with the bardo_complete entry
     entries = read_entries(transcript_path)
 
-    # 1. Summarize
+    # 1. Summarize → episodic/extended
     summary_json = _summarize_transcript(
         agent_config.name,
         incarnation_name,
@@ -115,7 +189,6 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         agent_config.bardo.model,
     )
 
-    # 2. Write episodic record
     episodic_dir = agent_config.episodic_extended_dir
     episodic_dir.mkdir(parents=True, exist_ok=True)
     episodic_path = episodic_dir / f"{incarnation_name}.jsonl"
@@ -128,33 +201,166 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         "summary": json.loads(summary_json),
     }
     append_entry(episodic_path, episodic_entry)
+    _set_permissions_safe(episodic_path, 0o640)
 
-    # 3. Archive to Akasha
+    # 2. Process memory_flag entries from transcript
+    memory_flags = [e for e in entries if e.get("type") == "memory_flag"]
+    for flag in memory_flags:
+        flag_entry = {
+            "ts": flag.get("ts", _now_iso()),
+            "type": "memory_flag",
+            "content": flag.get("content", ""),
+            "importance": flag.get("importance", "medium"),
+            "tier": flag.get("tier", "semantic"),
+            "category": flag.get("category", "general"),
+            "incarnation": incarnation_name,
+            "bardo_processed": True,
+        }
+        tier = flag.get("tier", "semantic")
+        if tier == "semantic_core":
+            # Write to semantic core with lock (may already be written during cycle)
+            # Bardo re-confirms it's there — idempotent since we check content
+            _ensure_semantic_core(agent_config, flag_entry)
+        elif tier in ("semantic", "semantic_extended"):
+            write_semantic_extended(
+                agent_config,
+                flag.get("category", "general"),
+                flag_entry,
+            )
+        # episodic tier flags are captured in the episodic summary above
+
+    # 3. Extract additional semantic insights (bardo-initiated, catches unflagged)
+    if cycle_count > 0:
+        insights = _extract_semantic_insights(
+            agent_config.name,
+            incarnation_name,
+            entries,
+            agent_config.bardo.model,
+        )
+        for insight in insights:
+            insight_entry = {
+                "ts": _now_iso(),
+                "type": "bardo_insight",
+                "content": insight.get("content", ""),
+                "importance": insight.get("importance", "medium"),
+                "category": insight.get("category", "general"),
+                "incarnation": incarnation_name,
+                "source": "bardo",
+            }
+            if insight_entry["content"]:
+                write_semantic_extended(
+                    agent_config,
+                    insight.get("category", "general"),
+                    insight_entry,
+                )
+
+    # 4. Archive to Akasha
     akasha_dir = agent_config.akasha_dir / incarnation_name
     akasha_dir.mkdir(parents=True, exist_ok=True)
 
     akasha_transcript = akasha_dir / f"{incarnation_name}-transcript.jsonl"
     shutil.copy2(transcript_path, akasha_transcript)
+    _set_permissions_safe(akasha_transcript, 0o640)
 
-    # 4. Copy scratch if non-empty
+    # 5. Copy scratch if non-empty
     if scratch_dir.exists() and any(scratch_dir.iterdir()):
         akasha_scratch = akasha_dir / "scratch"
         if akasha_scratch.exists():
             shutil.rmtree(akasha_scratch)
         shutil.copytree(scratch_dir, akasha_scratch)
 
-    # 5. Remove current symlink
+    # 6. Remove current symlink
     symlink = agent_config.current_symlink
     if symlink.is_symlink():
         symlink.unlink()
 
-    # 6. Clean karma incarnation folder
+    # 7. Clean karma incarnation folder
     shutil.rmtree(incarnation_dir)
 
     return {
         "status": "complete",
         "incarnation": incarnation_name,
         "cycles": cycle_count,
+        "memory_flags_processed": len(memory_flags),
         "episodic_path": str(episodic_path),
         "akasha_path": str(akasha_dir),
     }
+
+
+def _ensure_semantic_core(config: AgentConfig, entry: dict[str, Any]) -> None:
+    """
+    Ensure a semantic_core entry is in the core file.
+    Avoids duplicating entries already written during the live cycle.
+    """
+    from .memory import read_jsonl, write_semantic_core
+
+    existing = read_jsonl(config.semantic_core_path)
+    content = entry.get("content", "")
+
+    # Check for duplicate content
+    for e in existing:
+        if e.get("content", "") == content:
+            return  # Already present
+
+    write_semantic_core(config, entry)
+
+
+def check_bardo_timeouts(registry: Any) -> list[str]:
+    """
+    Check all agents for bardo timeout. Run by scheduler bardo_check task.
+    Returns list of agent names that had bardo triggered.
+    """
+    from .incarnation import get_active_incarnation
+
+    triggered = []
+    now = datetime.now(timezone.utc)
+
+    for agent_name in registry.all_agents():
+        config = registry.get(agent_name)
+        if not config:
+            continue
+
+        active_name = get_active_incarnation(config)
+        if not active_name:
+            continue
+
+        # Find incarnation start time from transcript
+        incarnation_dir = config.karma_dir / active_name
+        transcript_path = incarnation_dir / "transcript.jsonl"
+
+        if not transcript_path.exists():
+            continue
+
+        entries = read_entries(transcript_path)
+        start_entry = next(
+            (e for e in entries if e.get("type") == "incarnation_start"),
+            None,
+        )
+        if not start_entry:
+            continue
+
+        ts_str = start_entry.get("ts", "")
+        if not ts_str:
+            continue
+
+        try:
+            start_time = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        age_hours = (now - start_time).total_seconds() / 3600
+        timeout_hours = config.bardo.timeout_hours
+
+        if age_hours >= timeout_hours:
+            print(
+                f"[bardo] Timeout for {agent_name}/{active_name}: "
+                f"{age_hours:.1f}h >= {timeout_hours}h",
+                file=sys.stderr,
+            )
+            try:
+                run_bardo(config, active_name)
+                triggered.append(agent_name)
+            except Exception as e:
+                print(f"[bardo] Timeout bardo failed for {agent_name}: {e}", file=sys.stderr)
+
+    return triggered

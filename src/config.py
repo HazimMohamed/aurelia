@@ -15,10 +15,37 @@ MODEL_HAIKU = "claude-haiku-4-5-20251001"
 MODEL_SONNET = "claude-sonnet-4-6"
 MODEL_OPUS = "claude-opus-4-6"
 
+# Budget defaults per agent (weekly tokens)
+WEEKLY_BUDGET_DEFAULTS = {
+    "personal": 500_000,
+    "cooking": 300_000,
+    "finance": 200_000,
+    "mayor": 150_000,
+    "janitor": 1_000_000,
+}
+DEFAULT_WEEKLY_BUDGET = 300_000
+
+# Bardo timeout defaults (hours)
+BARDO_TIMEOUT_DEFAULTS = {
+    "personal": 120,  # 5 days
+}
+DEFAULT_BARDO_TIMEOUT_HOURS = 48
+
+# Heartbeat defaults (hours)
+HEARTBEAT_INTERVAL_DEFAULTS = {
+    "personal": 24,
+    "cooking": 2,
+    "finance": 6,
+    "mayor": 6,
+    "janitor": None,  # on-demand only
+}
+DEFAULT_HEARTBEAT_INTERVAL_HOURS = 2
+
 
 @dataclass
 class BardoConfig:
     model: str = MODEL_SONNET
+    timeout_hours: int = DEFAULT_BARDO_TIMEOUT_HOURS
 
 
 @dataclass
@@ -27,6 +54,9 @@ class AgentConfig:
     model: str = MODEL_SONNET
     description: str = ""
     bardo: BardoConfig = field(default_factory=BardoConfig)
+    weekly_budget_tokens: int = DEFAULT_WEEKLY_BUDGET
+    heartbeat_interval_hours: Optional[float] = None
+    discord_channel: str = ""
     home: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -64,6 +94,18 @@ class AgentConfig:
     def episodic_extended_dir(self) -> Path:
         return self.karma_dir / "episodic" / "extended"
 
+    @property
+    def episodic_core_dir(self) -> Path:
+        return self.karma_dir / "episodic" / "core"
+
+    @property
+    def semantic_core_path(self) -> Path:
+        return self.karma_dir / "semantic" / "core.jsonl"
+
+    @property
+    def semantic_extended_dir(self) -> Path:
+        return self.karma_dir / "semantic" / "extended"
+
 
 def load_global_config() -> dict:
     """Load /var/aurelia/config.json, return empty dict if missing."""
@@ -88,16 +130,41 @@ def load_agent_config(agent_name: str) -> AgentConfig:
     # Resolve model: agent.json > global defaults > hardcoded default
     model = agent_data.get("model") or defaults.get("model") or MODEL_SONNET
 
-    # Resolve bardo model
+    # Resolve bardo model and timeout
     bardo_data = agent_data.get("bardo") or defaults.get("bardo") or {}
     bardo_model = bardo_data.get("model") or MODEL_SONNET
-    bardo_cfg = BardoConfig(model=bardo_model)
+    bardo_timeout = (
+        bardo_data.get("timeout_hours")
+        or BARDO_TIMEOUT_DEFAULTS.get(agent_name)
+        or DEFAULT_BARDO_TIMEOUT_HOURS
+    )
+    bardo_cfg = BardoConfig(model=bardo_model, timeout_hours=int(bardo_timeout))
+
+    # Resolve weekly budget
+    weekly_budget = (
+        agent_data.get("weekly_budget_tokens")
+        or defaults.get("weekly_budget_tokens")
+        or WEEKLY_BUDGET_DEFAULTS.get(agent_name)
+        or DEFAULT_WEEKLY_BUDGET
+    )
+
+    # Resolve heartbeat interval
+    heartbeat_hours = (
+        agent_data.get("heartbeat_interval_hours")
+        or HEARTBEAT_INTERVAL_DEFAULTS.get(agent_name)
+        or DEFAULT_HEARTBEAT_INTERVAL_HOURS
+    )
+
+    discord_channel = agent_data.get("discord_channel", agent_name)
 
     return AgentConfig(
         name=agent_name,
         model=model,
         description=agent_data.get("description", ""),
         bardo=bardo_cfg,
+        weekly_budget_tokens=int(weekly_budget),
+        heartbeat_interval_hours=heartbeat_hours,
+        discord_channel=discord_channel,
     )
 
 

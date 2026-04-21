@@ -24,7 +24,10 @@ MEMORY_WRITE_SCHEMA = {
     "name": "memory_write",
     "description": (
         "Flag something for memory. Apply the six-month test: would this still matter "
-        "in six months? Use tier: semantic_core for critical always-in-context facts."
+        "in six months? Use tier: semantic_core for critical always-in-context facts. "
+        "semantic_core writes are immediate (before bardo). "
+        "semantic writes go to extended and are processed by bardo. "
+        "Use shared_context_write instead if all agents would benefit."
     ),
     "input_schema": {
         "type": "object",
@@ -42,7 +45,7 @@ MEMORY_WRITE_SCHEMA = {
             },
             "category": {
                 "type": "string",
-                "description": "Optional category tag for this memory",
+                "description": "Optional category tag for this memory (e.g. preferences, patterns, facts)",
             },
         },
         "required": ["content", "importance"],
@@ -110,6 +113,69 @@ LIST_TOOLS_SCHEMA = {
     "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
+DASHBOARD_NOTIFICATION_SCHEMA = {
+    "name": "dashboard_notification",
+    "description": (
+        "Post to God-lite's dashboard queue. Use for non-urgent informational content: "
+        "observations, briefings, findings, feedback. Not for urgent matters (use sos_alert for that)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The notification content"},
+            "category": {
+                "type": "string",
+                "enum": ["briefing", "alert", "observation", "find", "feedback", "curiosity"],
+                "description": "Category of this notification",
+            },
+        },
+        "required": ["content", "category"],
+    },
+}
+
+SHARED_CONTEXT_WRITE_SCHEMA = {
+    "name": "shared_context_write",
+    "description": (
+        "Share something about Hazim that ALL agents should know. "
+        "Apply the council-wide test: would every agent benefit from knowing this? "
+        "Examples: durable facts, current state, goals. "
+        "Do NOT use for things only you need — use memory_write for those."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["fact", "state", "context", "goal"],
+                "description": "Type of shared context entry",
+            },
+            "content": {"type": "string", "description": "The shared context content"},
+        },
+        "required": ["type", "content"],
+    },
+}
+
+SEARCH_EPISODIC_SCHEMA = {
+    "name": "search_episodic",
+    "description": (
+        "Search your episodic memory for relevant past experiences. "
+        "Keyword search across your episodic/extended/ history. "
+        "Use when you want to recall specific past events or conversations."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Keywords to search for"},
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of results to return (default: 5)",
+                "default": 5,
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
@@ -119,8 +185,7 @@ def handle_continue_task(input_data: dict[str, Any], **ctx: Any) -> None:
 
 
 def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
-    """Write a memory flag to the transcript (bardo picks it up later)."""
-    import json
+    """Write a memory flag to transcript and immediately to semantic core if tier=semantic_core."""
     from datetime import datetime, timezone
 
     agent_config = ctx.get("agent_config")
@@ -129,23 +194,59 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     content = input_data.get("content", "")
     importance = input_data.get("importance", "medium")
     tier = input_data.get("tier", "episodic")
-    category = input_data.get("category", "")
+    category = input_data.get("category", "general") or "general"
 
     if not content:
         return {"error": "content is required"}
 
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    entry = {
+        "ts": ts,
+        "type": "memory_flag",
+        "content": content,
+        "importance": importance,
+        "tier": tier,
+        "category": category,
+        "incarnation": incarnation_state["name"] if incarnation_state else "",
+    }
+
     # Write memory flag to transcript
     if incarnation_state:
         from ..transcript import append_entry
-        entry = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "type": "memory_flag",
-            "content": content,
-            "importance": importance,
-            "tier": tier,
-            "category": category,
-        }
         append_entry(incarnation_state["transcript_path"], entry)
+
+    # Immediate write to semantic core if tier=semantic_core (Path 1)
+    if tier == "semantic_core" and agent_config:
+        try:
+            from ..memory import write_semantic_core
+            write_semantic_core(agent_config, entry)
+            return {
+                "status": "written",
+                "tier": tier,
+                "importance": importance,
+                "message": "Written to semantic core immediately (always loaded).",
+            }
+        except Exception as e:
+            return {
+                "status": "flagged",
+                "tier": tier,
+                "importance": importance,
+                "message": f"Flagged to transcript; semantic core write failed: {e}",
+            }
+
+    # For semantic extended — also write immediately
+    if tier == "semantic" and agent_config:
+        try:
+            from ..memory import write_semantic_extended
+            write_semantic_extended(agent_config, category, entry)
+            return {
+                "status": "written",
+                "tier": tier,
+                "importance": importance,
+                "message": f"Written to semantic/extended/{category}.jsonl.",
+            }
+        except Exception as e:
+            pass  # Bardo will catch it from transcript
 
     return {
         "status": "flagged",
@@ -225,8 +326,9 @@ def handle_log_note(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
             "category": category,
         }
         append_entry(incarnation_state["transcript_path"], entry)
+        return {"status": "logged", "importance": importance, "note": note[:100]}
 
-    return {"status": "logged", "importance": importance}
+    return {"status": "not_logged", "reason": "no incarnation state"}
 
 
 def handle_list_tools(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
@@ -242,6 +344,123 @@ def handle_list_tools(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
             "description": schema.get("description", ""),
         })
     return {"tools": tools, "count": len(tools)}
+
+
+def handle_dashboard_notification(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
+    """Write a notification to the dashboard queue."""
+    import json
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    agent_config = ctx.get("agent_config")
+    incarnation_state = ctx.get("incarnation_state")
+
+    content = input_data.get("content", "")
+    category = input_data.get("category", "observation")
+
+    if not content:
+        return {"error": "content is required"}
+
+    agent_name = agent_config.name if agent_config else "unknown"
+    incarnation_name = incarnation_state["name"] if incarnation_state else ""
+
+    ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    filename = f"{ts.replace(':', '-')}-{agent_name}-{category}.json"
+
+    dashboard_dir = Path("/var/aurelia/dashboard/queue")
+    dashboard_dir.mkdir(parents=True, exist_ok=True)
+    path = dashboard_dir / filename
+
+    notification = {
+        "ts": ts,
+        "agent": agent_name,
+        "incarnation": incarnation_name,
+        "category": category,
+        "content": content,
+    }
+
+    try:
+        path.write_text(json.dumps(notification, indent=2))
+        return {"status": "queued", "category": category, "file": filename}
+    except OSError as e:
+        return {"error": f"Failed to write notification: {e}"}
+
+
+def handle_shared_context_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
+    """Write to shared hazim context stack with file lock."""
+    agent_config = ctx.get("agent_config")
+
+    entry_type = input_data.get("type", "")
+    content = input_data.get("content", "")
+
+    if not entry_type:
+        return {"error": "type is required"}
+    if not content:
+        return {"error": "content is required"}
+
+    author = agent_config.name if agent_config else "unknown"
+
+    try:
+        from ..memory import write_shared_context
+        entry = write_shared_context(
+            author=author,
+            entry_type=entry_type,
+            content=content,
+            score=0.75,  # default score for agent-written entries
+        )
+        return {
+            "status": "written",
+            "type": entry_type,
+            "content": content[:100],
+            "message": "Written to shared hazim context (all agents will see this).",
+        }
+    except Exception as e:
+        return {"error": f"Failed to write shared context: {e}"}
+
+
+def handle_search_episodic(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
+    """Keyword search across episodic/extended memory."""
+    agent_config = ctx.get("agent_config")
+
+    query = input_data.get("query", "")
+    limit = input_data.get("limit", 5)
+
+    if not query:
+        return {"error": "query is required"}
+
+    if not agent_config:
+        return {"error": "no agent_config in context"}
+
+    try:
+        from ..memory import search_episodic
+        results = search_episodic(agent_config, query, limit=limit)
+
+        formatted = []
+        for entry in results:
+            incarnation = entry.get("incarnation", "unknown")
+            ts = entry.get("ts", "")
+            summary_data = entry.get("summary", {})
+            if isinstance(summary_data, dict):
+                summary = summary_data.get("summary", "")
+                topics = summary_data.get("topics", [])
+            else:
+                summary = str(summary_data)
+                topics = []
+
+            formatted.append({
+                "incarnation": incarnation,
+                "ts": ts,
+                "summary": summary,
+                "topics": topics,
+            })
+
+        return {
+            "query": query,
+            "results": formatted,
+            "count": len(formatted),
+        }
+    except Exception as e:
+        return {"error": f"Search failed: {e}"}
 
 
 # ── Registration ───────────────────────────────────────────────────────────────
@@ -270,6 +489,9 @@ def register_core_tools(
     registry.register(SCHEDULE_TASK_SCHEMA, make_handler(handle_schedule_task))
     registry.register(LOG_NOTE_SCHEMA, make_handler(handle_log_note))
     registry.register(LIST_TOOLS_SCHEMA, make_handler(handle_list_tools))
+    registry.register(DASHBOARD_NOTIFICATION_SCHEMA, make_handler(handle_dashboard_notification))
+    registry.register(SHARED_CONTEXT_WRITE_SCHEMA, make_handler(handle_shared_context_write))
+    registry.register(SEARCH_EPISODIC_SCHEMA, make_handler(handle_search_episodic))
 
 
 def _load_agent_token(agent_name: str) -> str:

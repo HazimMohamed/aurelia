@@ -141,12 +141,12 @@ setup_agent() {
         fi
     fi
 
-    # Create directory structure
+    # Create directory structure (M3: semantic/extended and episodic/core added)
     mkdirs "$home" \
         identity \
         karma/episodic/core \
         karma/episodic/extended \
-        karma/semantic \
+        karma/semantic/extended \
         akasha \
         room \
         dharma
@@ -155,6 +155,18 @@ setup_agent() {
     if [[ ! -f "${home}/karma/semantic/core.jsonl" ]]; then
         touch "${home}/karma/semantic/core.jsonl"
         log "  created ${home}/karma/semantic/core.jsonl"
+    fi
+
+    # Create /var/aurelia/budgets/ if missing
+    if [[ ! -d /var/aurelia/budgets ]]; then
+        mkdir -p /var/aurelia/budgets
+        log "  created /var/aurelia/budgets/"
+    fi
+
+    # Create /var/aurelia/dashboard/queue if missing
+    if [[ ! -d /var/aurelia/dashboard/queue ]]; then
+        mkdir -p /var/aurelia/dashboard/queue
+        log "  created /var/aurelia/dashboard/queue/"
     fi
 
     # Write agent.json

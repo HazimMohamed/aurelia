@@ -56,6 +56,19 @@ class AgentRegistry:
         if not config:
             return {"status": "unknown"}
 
+        # Check budget status first
+        try:
+            from .budget import load_budget
+            budget_data = load_budget(agent_name)
+            if budget_data.get("status") == "budget_paused":
+                last_active = _get_last_active_from_akasha(config)
+                return {
+                    "status": "budget_paused",
+                    "last_active": last_active,
+                }
+        except Exception:
+            pass
+
         active_incarnation = get_active_incarnation(config)
         if not active_incarnation:
             # Check last activity from akasha
