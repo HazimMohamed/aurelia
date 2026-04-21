@@ -1,0 +1,1083 @@
+#!/usr/bin/env python3
+"""aurelia — God-lite's control interface for the plane."""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── Bootstrap: ensure project root is on path ─────────────────────────────────
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# ── Rich / Click imports ───────────────────────────────────────────────────────
+
+try:
+    import click
+    from rich import box
+    from rich.console import Console
+    from rich.live import Live
+    from rich.markup import escape
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+except ImportError:
+    print("ERROR: rich and click are required.  Run: pip install rich click")
+    sys.exit(1)
+
+console = Console()
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+SOCKET_PATH = Path("/var/aurelia/runtime.sock")
+PIDS_DIR = Path("/var/aurelia/pids")
+LOGS_DIR = Path("/var/aurelia/logs")
+SCHEDULER_PENDING = Path("/var/aurelia/scheduler/pending")
+
+# ── Low-level socket helper ───────────────────────────────────────────────────
+
+def _socket_call(request: dict) -> tuple[bool, object]:
+    """Send a JSON request to the runtime socket and return (ok, data)."""
+    import uuid
+    if "id" not in request:
+        request = {**request, "id": str(uuid.uuid4())}
+    payload = json.dumps(request).encode("utf-8") + b"\n"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(300.0)
+            sock.connect(str(SOCKET_PATH))
+            sock.sendall(payload)
+            buf = b""
+            while b"\n" not in buf:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return False, "Connection closed unexpectedly"
+                buf += chunk
+            line, _ = buf.split(b"\n", 1)
+            response = json.loads(line.decode("utf-8"))
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False, "socket_unreachable"
+    except json.JSONDecodeError as e:
+        return False, f"Malformed response: {e}"
+    except OSError as e:
+        return False, str(e)
+
+    if response.get("status") == "error":
+        return False, response.get("message", "Unknown error")
+    return True, response.get("data")
+
+
+def _require_runtime() -> bool:
+    """Check runtime is up; print error and return False if not."""
+    ok, _ = _socket_call({"type": "get_health"})
+    if not ok:
+        console.print()
+        console.print("  [red]✗ Runtime daemon is not running[/red]")
+        console.print("  [dim]Start it with: aurelia start[/dim]")
+        console.print()
+    return ok
+
+
+def _runtime_ok() -> bool:
+    ok, _ = _socket_call({"type": "get_health"})
+    return ok
+
+
+def _http_ok() -> bool:
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://localhost:8000/health", timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _read_pid(name: str) -> int | None:
+    pid_file = PIDS_DIR / f"{name}.pid"
+    if pid_file.exists():
+        try:
+            return int(pid_file.read_text().strip())
+        except (ValueError, OSError):
+            return None
+    return None
+
+
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _count_pending() -> int:
+    if not SCHEDULER_PENDING.exists():
+        return 0
+    return sum(1 for f in SCHEDULER_PENDING.iterdir() if f.suffix == ".json")
+
+
+def _load_env() -> dict:
+    """Load .env from project root into a dict, merged with os.environ."""
+    env = os.environ.copy()
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.exists():
+        try:
+            from dotenv import dotenv_values
+            env.update(dotenv_values(str(env_path)))
+        except ImportError:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
+
+
+# ── Formatting helpers ─────────────────────────────────────────────────────────
+
+def _budget_bar(remaining: int | None, total: int | None) -> Text:
+    """Return a 10-char block bar + remaining tokens display."""
+    if remaining is None or total is None:
+        return Text("—", style="dim")
+
+    ratio = remaining / total if total > 0 else 0
+
+    filled = round(ratio * 10)
+    filled = max(0, min(10, filled))
+    empty = 10 - filled
+    bar = "▓" * filled + "░" * empty
+
+    if ratio > 0.5:
+        color = "green"
+    elif ratio > 0.2:
+        color = "yellow"
+    else:
+        color = "red"
+
+    def _fmt(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1_000:
+            return f"{n // 1_000}k"
+        return str(n)
+
+    return Text(f"{bar} {_fmt(remaining)}", style=color)
+
+
+def _status_dot(status: str) -> Text:
+    match status:
+        case "active":
+            return Text("● active", style="bold green")
+        case "sleeping" | "sleep":
+            return Text("○ sleep", style="dim white")
+        case "budget_paused":
+            return Text("⊘ paused", style="bold red")
+        case "error":
+            return Text("✗ error", style="bold red")
+        case _:
+            return Text(f"? {status}", style="dim")
+
+
+def _relative_time(ts_str: str | None) -> str:
+    """Convert ISO timestamp to relative human string like '2m ago'."""
+    if not ts_str:
+        return "never"
+    try:
+        # Try with and without timezone suffix
+        for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                    "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                dt = datetime.strptime(ts_str, fmt)
+                break
+            except ValueError:
+                continue
+        else:
+            return ts_str[:16]
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        diff = int((now - dt).total_seconds())
+
+        if diff < 60:
+            return f"{diff}s ago"
+        if diff < 3600:
+            return f"{diff // 60}m ago"
+        if diff < 86400:
+            return f"{diff // 3600}h ago"
+        return f"{diff // 86400}d ago"
+    except Exception:
+        return ts_str[:16] if ts_str else "never"
+
+
+def _now_str() -> str:
+    return datetime.now().strftime("%A %-d %b %Y  %H:%M")
+
+
+# ── Status dashboard renderables ───────────────────────────────────────────────
+
+def _build_header() -> Panel:
+    title_line = Text("\u2726  AURELIA — THE PLANE  \u2726", style="bold white", justify="center")
+    time_line = Text(_now_str(), style="dim white", justify="center")
+    content = Text.assemble(title_line, "\n", time_line)
+    return Panel(content, box=box.DOUBLE, style="bold", expand=True)
+
+
+def _build_agents_table(agents: list[dict]) -> Table:
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        show_header=True,
+        header_style="bold dim white",
+        expand=False,
+        padding=(0, 1),
+    )
+    table.add_column("Agent", style="white", min_width=10)
+    table.add_column("Status", min_width=14)
+    table.add_column("Incarnation", min_width=26)
+    table.add_column("Cycle", justify="right", min_width=6)
+    table.add_column("Budget", min_width=18)
+    table.add_column("Last Active", min_width=12)
+
+    for a in agents:
+        status = a.get("status", "unknown")
+        incarnation = a.get("incarnation") or "—"
+        cycle = str(a.get("cycle") or "—")
+        last_active = _relative_time(a.get("last_active"))
+        budget_text = _budget_bar(a.get("budget_remaining"), a.get("weekly_budget"))
+        status_text = _status_dot(status)
+        row_style = "" if status == "active" else "dim"
+
+        table.add_row(
+            Text(a["name"], style=row_style),
+            status_text,
+            Text(incarnation, style=row_style),
+            Text(cycle, style=row_style),
+            budget_text,
+            Text(last_active, style=row_style),
+        )
+
+    return table
+
+
+def _build_system_table() -> Table:
+    runtime_pid = _read_pid("runtime")
+    http_pid = _read_pid("http")
+    runtime_up = _runtime_ok()
+    http_up = _http_ok()
+
+    table = Table(
+        box=box.SIMPLE_HEAVY,
+        show_header=True,
+        header_style="bold dim white",
+        expand=False,
+        padding=(0, 1),
+    )
+    table.add_column("Process", min_width=20)
+    table.add_column("Status", min_width=10)
+    table.add_column("PID", min_width=8)
+
+    def _row(name: str, up: bool, pid: int | None) -> None:
+        status_text = Text("● up", style="bold green") if up else Text("○ down", style="bold red")
+        pid_str = str(pid) if pid else "—"
+        table.add_row(name, status_text, pid_str)
+
+    _row("runtime daemon", runtime_up, runtime_pid)
+    _row("http transport", http_up, http_pid)
+    return table
+
+
+def _build_status_layout(agents: list[dict]) -> object:
+    from rich.console import Group as RichGroup
+
+    header = _build_header()
+    agents_label = Text("\n  AGENTS", style="bold white")
+    agents_table = _build_agents_table(agents)
+    system_label = Text("\n  SYSTEM", style="bold white")
+    system_table = _build_system_table()
+
+    pending = _count_pending()
+    # dashboard notifications — peek at queue dir
+    dash_queue = Path("/var/aurelia/dashboard/queue")
+    dash_pending = len(list(dash_queue.glob("*.json"))) if dash_queue.exists() else 0
+
+    footer = Text(
+        f"\n  {pending} items pending in scheduler   ·   {dash_pending} dashboard notifications"
+        "\n  Refreshing every 3s — press Ctrl-C to exit",
+        style="dim",
+    )
+
+    return RichGroup(header, agents_label, agents_table, system_label, system_table, footer)
+
+
+# ── CLI root ───────────────────────────────────────────────────────────────────
+
+@click.group()
+def cli() -> None:
+    """Aurelia — God-lite's control interface for the plane."""
+
+
+# ── aurelia status ─────────────────────────────────────────────────────────────
+
+@cli.command("status")
+@click.option("--once", is_flag=True, help="Print once and exit (no auto-refresh).")
+def cmd_status(once: bool) -> None:
+    """Live dashboard — auto-refreshes every 3 seconds."""
+
+    def _fetch_agents() -> list[dict]:
+        ok, data = _socket_call({"type": "list_agents"})
+        if not ok or not isinstance(data, list):
+            return []
+        return data
+
+    def _render():
+        return _build_status_layout(_fetch_agents())
+
+    if once:
+        console.print(_render())
+        return
+
+    try:
+        with Live(
+            _render(),
+            refresh_per_second=1,
+            screen=False,
+            console=console,
+        ) as live:
+            while True:
+                time.sleep(3)
+                live.update(_render())
+    except KeyboardInterrupt:
+        pass
+
+
+# ── aurelia start ─────────────────────────────────────────────────────────────
+
+@cli.command("start")
+@click.option("--http", "with_http", is_flag=True, help="Also start HTTP transport.")
+def cmd_start(with_http: bool) -> None:
+    """Start the runtime daemon (and optionally HTTP transport)."""
+    console.print("\n  [bold]Starting Aurelia...[/bold]\n")
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)
+    env = _load_env()
+
+    # ── Runtime daemon ────────────────────────────────────────────────────────
+    if _runtime_ok():
+        runtime_pid = _read_pid("runtime")
+        console.print(f"  [dim]Runtime daemon already running (pid={runtime_pid})[/dim]")
+    else:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "src.samsara.runtime_daemon"],
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            (PIDS_DIR / "runtime.pid").write_text(str(proc.pid))
+        except Exception as e:
+            console.print(f"  [red]✗ Failed to start runtime daemon:[/red] {e}\n")
+            return
+
+        console.print("  [dim]Waiting for runtime socket...[/dim]", end="", flush=True)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if SOCKET_PATH.exists() and _runtime_ok():
+                break
+            time.sleep(0.3)
+        else:
+            console.print()
+            console.print("  [red]✗ Timed out waiting for runtime socket[/red]\n")
+            return
+        runtime_pid = _read_pid("runtime")
+        console.print(f"\r  [green]✓ Runtime is live (pid={runtime_pid})[/green]          ")
+
+    # ── HTTP transport (optional) ─────────────────────────────────────────────
+    if with_http:
+        _start_http(env)
+
+    console.print()
+
+
+def _start_http(env: dict | None = None) -> None:
+    """Launch the HTTP transport, waiting up to 5s for it to come up."""
+    if env is None:
+        env = _load_env()
+
+    if _http_ok():
+        http_pid = _read_pid("http")
+        console.print(f"  [dim]HTTP transport already running (pid={http_pid})[/dim]")
+        return
+
+    try:
+        proc = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn",
+                "src.transport.http:app",
+                "--host", "0.0.0.0",
+                "--port", "8000",
+            ],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        (PIDS_DIR / "http.pid").write_text(str(proc.pid))
+    except Exception as e:
+        console.print(f"  [red]✗ Failed to start HTTP transport:[/red] {e}")
+        return
+
+    console.print("  [dim]Waiting for HTTP transport...[/dim]", end="", flush=True)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if _http_ok():
+            break
+        time.sleep(0.3)
+
+    http_pid = _read_pid("http")
+    if _http_ok():
+        console.print(f"\r  [green]✓ HTTP transport is live (pid={http_pid})[/green]          ")
+    else:
+        console.print(f"\r  [yellow]~ HTTP transport started (pid={http_pid}) but not yet responding[/yellow]")
+
+
+# ── aurelia stop ──────────────────────────────────────────────────────────────
+
+@cli.command("stop")
+@click.option("--http", "http_only", is_flag=True, help="Stop HTTP transport only.")
+def cmd_stop(http_only: bool) -> None:
+    """Graceful shutdown of the plane (or just HTTP with --http)."""
+    if http_only:
+        console.print("\n  [bold]Stopping HTTP transport...[/bold]\n")
+    else:
+        console.print("\n  [bold]Stopping Aurelia...[/bold]\n")
+
+    def _stop_pid(name: str, label: str) -> None:
+        pid = _read_pid(name)
+        if pid and _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    if not _pid_alive(pid):
+                        break
+                    time.sleep(0.2)
+                console.print(f"  [green]✓ {label} stopped[/green]")
+            except OSError as e:
+                console.print(f"  [red]✗ Failed to stop {label}:[/red] {e}")
+        else:
+            console.print(f"  [dim]{label} was not running[/dim]")
+        pid_file = PIDS_DIR / f"{name}.pid"
+        pid_file.unlink(missing_ok=True)
+
+    if http_only:
+        _stop_pid("http", "HTTP transport")
+    else:
+        _stop_pid("http", "HTTP transport")
+        _stop_pid("runtime", "Runtime daemon")
+        console.print("  [dim]Plane offline.[/dim]")
+
+    console.print()
+
+
+# ── aurelia serve ─────────────────────────────────────────────────────────────
+
+@cli.group("serve")
+def cmd_serve() -> None:
+    """Start individual transports."""
+
+
+@cmd_serve.command("http")
+def cmd_serve_http() -> None:
+    """Start the HTTP transport (runtime must already be running)."""
+    console.print()
+    if not _runtime_ok():
+        console.print("  [red]✗ Runtime daemon is not running[/red]")
+        console.print("  [dim]Start it with: aurelia start[/dim]\n")
+        return
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)
+    _start_http()
+    console.print()
+
+
+@cmd_serve.command("discord")
+def cmd_serve_discord() -> None:
+    """Start the Discord transport."""
+    console.print()
+    console.print("  [dim]Discord transport coming in M4[/dim]")
+    console.print()
+
+
+# ── aurelia agent ─────────────────────────────────────────────────────────────
+
+@cli.group("agent")
+def cmd_agent() -> None:
+    """Manage individual agent daemons and incarnations."""
+
+
+@cmd_agent.command("start")
+@click.argument("name")
+def cmd_agent_start(name: str) -> None:
+    """Launch (or restart) an agent daemon."""
+    console.print(f"\n  [bold]Starting agent daemon: {escape(name)}[/bold]\n")
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)
+    pid_name = f"agent-{name}"
+    pid = _read_pid(pid_name)
+    if pid and _pid_alive(pid):
+        console.print(f"  [dim]Agent daemon already running (pid={pid})[/dim]\n")
+        return
+
+    env = _load_env()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "src.samsara.agent_daemon", name],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        (PIDS_DIR / f"{pid_name}.pid").write_text(str(proc.pid))
+        console.print(f"  [green]✓ Agent daemon started (pid={proc.pid})[/green]\n")
+    except Exception as e:
+        console.print(f"  [red]✗ Failed to start agent daemon:[/red] {e}\n")
+
+
+@cmd_agent.command("stop")
+@click.argument("name")
+def cmd_agent_stop(name: str) -> None:
+    """Stop an agent daemon."""
+    console.print(f"\n  [bold]Stopping agent daemon: {escape(name)}[/bold]\n")
+    pid_name = f"agent-{name}"
+    pid = _read_pid(pid_name)
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                if not _pid_alive(pid):
+                    break
+                time.sleep(0.2)
+            console.print(f"  [green]✓ Agent daemon stopped[/green]")
+        except OSError as e:
+            console.print(f"  [red]✗ Failed to stop agent daemon:[/red] {e}")
+    else:
+        console.print(f"  [dim]Agent daemon was not running[/dim]")
+
+    (PIDS_DIR / f"{pid_name}.pid").unlink(missing_ok=True)
+    console.print()
+
+
+@cmd_agent.command("status")
+@click.argument("name")
+def cmd_agent_status(name: str) -> None:
+    """Detailed status view for a single agent."""
+    if not _require_runtime():
+        return
+
+    # Fetch agent data from list_agents
+    ok, data = _socket_call({"type": "list_agents"})
+    agent_info: dict | None = None
+    if ok and isinstance(data, list):
+        for a in data:
+            if a.get("name") == name:
+                agent_info = a
+                break
+
+    if agent_info is None:
+        console.print(f"\n  [red]✗ Agent '{escape(name)}' not found[/red]\n")
+        return
+
+    status = agent_info.get("status", "unknown")
+    incarnation = agent_info.get("incarnation") or "—"
+    cycle = agent_info.get("cycle")
+    last_active = _relative_time(agent_info.get("last_active"))
+    budget_remaining = agent_info.get("budget_remaining")
+    weekly_budget = agent_info.get("weekly_budget")
+    sched_q = agent_info.get("scheduler_queue", 0)
+
+    status_text = _status_dot(status)
+    budget_text = _budget_bar(budget_remaining, weekly_budget)
+
+    # Daemon PID
+    daemon_pid = _read_pid(f"agent-{name}")
+    daemon_alive = _pid_alive(daemon_pid)
+
+    lines = Text()
+    lines.append(f"  Status:      ")
+    lines.append_text(status_text)
+    lines.append(f"\n  Incarnation: {incarnation}\n")
+    lines.append(f"  Cycle:       {cycle or '—'}\n")
+    lines.append(f"  Last active: {last_active}\n")
+    lines.append("  Budget:      ")
+    lines.append_text(budget_text)
+    lines.append(f"\n  Scheduler Q: {sched_q}\n")
+    if daemon_pid:
+        daemon_status = "running" if daemon_alive else "dead"
+        lines.append(f"  Daemon PID:  {daemon_pid} ({daemon_status})\n")
+
+    console.print()
+    console.print(Panel(lines, title=f"[bold]{escape(name)}[/bold]", expand=False))
+
+    # Last 5 transcript entries
+    if incarnation != "—":
+        ok2, hist = _socket_call({"type": "get_history", "agent": name, "incarnation": incarnation})
+        if ok2 and isinstance(hist, list) and hist:
+            last_5 = hist[-5:]
+            console.print(f"\n  [bold dim]Last {len(last_5)} transcript entries:[/bold dim]")
+            _print_transcript_entries(last_5, indent="    ")
+
+    console.print()
+
+
+@cmd_agent.command("spawn")
+@click.argument("name")
+@click.option("--goal", default=None, help="Goal for the new incarnation.")
+def cmd_agent_spawn(name: str, goal: str | None) -> None:
+    """Spawn a fresh incarnation for an agent."""
+    if not _require_runtime():
+        return
+
+    console.print(f"\n  [bold]Spawning incarnation for {escape(name)}...[/bold]")
+
+    request: dict = {"type": "spawn", "agent": name}
+    if goal:
+        request["goal"] = goal
+
+    ok, data = _socket_call(request)
+    if not ok:
+        console.print(f"  [red]✗ Spawn failed:[/red] {data}\n")
+        return
+
+    if isinstance(data, dict):
+        inc_name = data.get("name", "unknown")
+        inc_cycle = data.get("cycle", 0)
+        console.print(f"  [green]✓ Spawned[/green] [white]{escape(inc_name)}[/white]")
+        console.print(f"    cycle: {inc_cycle}")
+    else:
+        console.print(f"  [green]✓ Done[/green]")
+    console.print()
+
+
+@cmd_agent.command("bardo")
+@click.argument("name")
+def cmd_agent_bardo(name: str) -> None:
+    """Trigger manual bardo for an agent's active incarnation."""
+    if not _require_runtime():
+        return
+
+    console.print(f"\n  [bold]Triggering bardo for {escape(name)}...[/bold]")
+
+    ok, data = _socket_call({"type": "trigger_bardo", "agent": name})
+    if not ok:
+        console.print(f"  [red]✗ Bardo failed:[/red] {data}\n")
+        return
+
+    if isinstance(data, dict):
+        status = data.get("status", "unknown")
+        if status == "no_active":
+            console.print(f"  [yellow]No active incarnation for {escape(name)}[/yellow]\n")
+            return
+
+        console.print("  [green]✓ Bardo complete[/green]")
+        incarnation = data.get("incarnation") or data.get("name")
+        if incarnation:
+            console.print(f"    incarnation:    [dim]{escape(str(incarnation))}[/dim]")
+        cycles = data.get("cycles")
+        if cycles is not None:
+            console.print(f"    cycles:         [dim]{cycles}[/dim]")
+        flags = data.get("memory_flags_processed")
+        if flags is not None:
+            console.print(f"    memory flags:   [dim]{flags}[/dim]")
+        episodic = data.get("episodic_path")
+        if episodic:
+            console.print(f"    episodic record:[dim]{escape(str(episodic))}[/dim]")
+    else:
+        console.print("  [green]✓ Bardo complete[/green]")
+    console.print()
+
+
+# ── aurelia message ───────────────────────────────────────────────────────────
+
+@cli.command("message")
+@click.argument("agent")
+@click.argument("text", nargs=-1, required=True)
+def cmd_message(agent: str, text: tuple[str, ...]) -> None:
+    """Send a message to an agent and show the response."""
+    if not _require_runtime():
+        return
+
+    msg = " ".join(text)
+
+    # Get active incarnation
+    ok, active_data = _socket_call({"type": "get_active", "agent": agent})
+    active_name: str | None = None
+    if ok and isinstance(active_data, dict):
+        active_name = active_data.get("active")
+
+    # Spawn if needed
+    if not active_name:
+        ok2, spawn_data = _socket_call({"type": "spawn", "agent": agent})
+        if ok2 and isinstance(spawn_data, dict):
+            active_name = spawn_data.get("name")
+        else:
+            console.print(f"  [red]✗ Could not get/spawn incarnation:[/red] {spawn_data}\n")
+            return
+
+    if not active_name:
+        console.print(f"  [red]✗ No active incarnation for {escape(agent)}[/red]\n")
+        return
+
+    # Get cycle from list_agents
+    ok3, agents_data = _socket_call({"type": "list_agents"})
+    cycle: int | None = None
+    if ok3 and isinstance(agents_data, list):
+        for a in agents_data:
+            if a.get("name") == agent:
+                cycle = a.get("cycle")
+
+    # Dispatch
+    ok4, resp_data = _socket_call({
+        "type": "dispatch",
+        "agent": agent,
+        "incarnation": active_name,
+        "hook": "human_message",
+        "payload": {"content": msg, "sender": "god-lite"},
+    })
+
+    console.print()
+    # Header line: ✦ agent · incarnation · cycle N
+    header = Text()
+    header.append("  \u2726 ", style="bold yellow")
+    header.append(escape(agent), style="bold white")
+    header.append(f" · {escape(active_name)}", style="dim")
+    if cycle is not None:
+        new_cycle = resp_data.get("cycle", cycle) if isinstance(resp_data, dict) else cycle
+        header.append(f" · cycle {new_cycle}", style="dim")
+    console.print(header)
+    console.print(f"  [dim]{'─' * 46}[/dim]")
+
+    if not ok4:
+        console.print(f"  [red]✗ Error:[/red] {resp_data}\n")
+        return
+
+    if isinstance(resp_data, dict):
+        content = resp_data.get("content", "")
+        if content:
+            # Render as markdown with an indent
+            md = Markdown(content)
+            console.print("  ", end="")
+            console.print(md)
+        else:
+            console.print("  [dim](empty response)[/dim]")
+    else:
+        console.print(f"  [dim]{resp_data}[/dim]")
+    console.print()
+
+
+# ── aurelia history ───────────────────────────────────────────────────────────
+
+@cli.command("history")
+@click.argument("agent")
+@click.argument("incarnation", required=False, default=None)
+def cmd_history(agent: str, incarnation: str | None) -> None:
+    """List incarnations, or pretty-print a specific incarnation's transcript."""
+    if not _require_runtime():
+        return
+
+    if incarnation is None:
+        # List all incarnations
+        ok, data = _socket_call({"type": "list_incarnations", "agent": agent})
+        if not ok:
+            console.print(f"  [red]✗ Error:[/red] {data}\n")
+            return
+
+        if not isinstance(data, list) or not data:
+            console.print(f"\n  [dim]No incarnations found for {escape(agent)}[/dim]\n")
+            return
+
+        console.print(f"\n  [bold]Incarnations — {escape(agent)}[/bold]\n")
+        for inc in data:
+            status = inc.get("status", "unknown")
+            name = inc.get("name", "unknown")
+            cycle = inc.get("cycle")
+            last = inc.get("last_active")
+
+            cycle_str = f"cycle {cycle}" if cycle is not None else ""
+            last_str = _relative_time(last)
+
+            if status == "active":
+                bullet = Text("● ", style="bold green")
+                name_text = Text(name, style="bold green")
+                status_text = Text("active", style="bold green")
+            elif status == "dissolved":
+                bullet = Text("○ ", style="dim")
+                name_text = Text(name, style="dim")
+                status_text = Text("dissolved", style="dim")
+            else:
+                bullet = Text("○ ", style="dim")
+                name_text = Text(name, style="dim")
+                status_text = Text(status, style="dim")
+
+            line = Text("  ")
+            line.append_text(bullet)
+            line.append_text(name_text)
+            line.append(f"   {status}   ", style="dim")
+            line.append(f"{cycle_str}   ", style="dim")
+            line.append(last_str, style="dim")
+            console.print(line)
+
+        console.print()
+        return
+
+    # Pretty-print transcript
+    ok, data = _socket_call({
+        "type": "get_history",
+        "agent": agent,
+        "incarnation": incarnation,
+    })
+    if not ok:
+        console.print(f"  [red]✗ Error:[/red] {data}\n")
+        return
+
+    if not isinstance(data, list):
+        console.print("  [dim]No transcript data[/dim]\n")
+        return
+
+    sep = "─" * 60
+    console.print(f"\n  [bold]{escape(agent)}[/bold] / [dim]{escape(incarnation)}[/dim]\n")
+    console.print(f"  [dim]{sep}[/dim]")
+    _print_transcript_entries(data)
+    console.print(f"\n  [dim]({len(data)} entries)[/dim]\n")
+
+
+# ── Transcript rendering ───────────────────────────────────────────────────────
+
+_ENTRY_COLORS = {
+    "human_message": "bold cyan",
+    "assistant_message": "white",
+    "tool_call": "dim blue",
+    "tool_result": "dim",
+    "incarnation_start": "bold magenta",
+    "bardo_complete": "bold green",
+    "memory_flag": "yellow",
+    "agent_note": "dim green",
+    "episodic_summary": "blue",
+    "undissolved": "dim magenta",
+    "bardo_insight": "green",
+}
+
+_ENTRY_LABELS = {
+    "human_message": "Human",
+    "assistant_message": "Agent",
+    "incarnation_start": "--- Incarnation Start ---",
+    "bardo_complete": "--- Bardo Complete ---",
+    "episodic_summary": "--- Episodic Summary ---",
+    "memory_flag": "Memory Flag",
+    "agent_note": "Agent Note",
+    "tool_call": "Tool Call",
+    "tool_result": "Tool Result",
+    "invitation_response": "Invitation Response",
+    "undissolved": "--- Undissolved ---",
+    "bardo_insight": "Bardo Insight",
+}
+
+SEP = "─" * 60
+
+
+def _print_transcript_entries(entries: list[dict], indent: str = "  ") -> None:
+    """Render a list of transcript entry dicts to console."""
+    for entry in entries:
+        if isinstance(entry, dict):
+            entry_dict = entry
+        else:
+            # TranscriptEntry dataclass
+            entry_dict = entry.__dict__ if hasattr(entry, "__dict__") else {}
+
+        entry_type = entry_dict.get("type", "unknown")
+        ts = entry_dict.get("ts", "")
+        cycle = entry_dict.get("cycle", "")
+        content = entry_dict.get("content") or ""
+        extra = {k: v for k, v in entry_dict.items() if k not in {"ts", "type", "content", "cycle"}}
+
+        label = _ENTRY_LABELS.get(entry_type, entry_type)
+        color = _ENTRY_COLORS.get(entry_type, "white")
+
+        header_parts = [f"{indent}[{color}]{escape(label)}[/{color}]"]
+        if ts:
+            header_parts.append(f"[dim]{escape(str(ts))}[/dim]")
+        if cycle:
+            header_parts.append(f"[dim]cycle {cycle}[/dim]")
+        console.print("  ".join(header_parts))
+
+        if entry_type == "tool_call":
+            tool_name = extra.get("tool_name", "")
+            tool_input = extra.get("tool_input", {})
+            console.print(f"{indent}  Tool: [dim blue]{escape(str(tool_name))}[/dim blue]")
+            if tool_input:
+                try:
+                    inp = json.dumps(tool_input, indent=2)
+                    if len(inp) > 300:
+                        inp = inp[:300] + "\n    [... truncated ...]"
+                    for line in inp.splitlines():
+                        console.print(f"{indent}  [dim]{escape(line)}[/dim]")
+                except Exception:
+                    pass
+        elif entry_type == "tool_result":
+            result = extra.get("result", "")
+            result_str = json.dumps(result, indent=2) if isinstance(result, (dict, list)) else str(result)
+            if len(result_str) > 300:
+                result_str = result_str[:300] + "\n    [... truncated ...]"
+            for line in result_str.splitlines():
+                console.print(f"{indent}  [dim]{escape(line)}[/dim]")
+        elif content:
+            preview = content[:600] + (" ..." if len(content) > 600 else "")
+            console.print(f"\n{indent}[dim]{escape(preview)}[/dim]\n")
+
+        console.print(f"{indent}[dim]{SEP}[/dim]")
+
+
+# ── aurelia logs ──────────────────────────────────────────────────────────────
+
+@cli.command("logs")
+@click.argument("target")
+@click.option("-n", "--lines", default=50, help="Number of initial tail lines.")
+def cmd_logs(target: str, lines: int) -> None:
+    """Tail logs. TARGET is 'runtime', 'http', or an agent name."""
+
+    if target in ("runtime", "http"):
+        log_file = LOGS_DIR / f"{target}.log"
+        if not log_file.exists():
+            console.print(f"\n  [red]Log file not found:[/red] {log_file}\n")
+            return
+        source_color = "cyan" if target == "runtime" else "magenta"
+        console.print(f"\n  [bold]Tailing {target} log[/bold] [dim]{log_file}[/dim]\n")
+        try:
+            proc = subprocess.Popen(
+                ["tail", "-f", "-n", str(lines), str(log_file)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip()
+                low = line.lower()
+                if "error" in low or "exception" in low or "traceback" in low:
+                    console.print(Text(line, style="bold red"))
+                elif "warn" in low:
+                    console.print(Text(line, style="yellow"))
+                else:
+                    console.print(Text(line, style=source_color))
+        except KeyboardInterrupt:
+            pass
+        return
+
+    # Agent transcript live-follow
+    agent = target
+    agent_home = Path("/home") / agent
+    if not agent_home.exists():
+        console.print(f"\n  [red]Agent home not found:[/red] {agent_home}\n")
+        return
+
+    # Resolve transcript path: prefer karma/current, fall back to akasha latest
+    transcript_path: Path | None = None
+    karma_current = agent_home / "karma" / "current"
+    if karma_current.exists() or karma_current.is_symlink():
+        try:
+            active_dir = karma_current.resolve()
+            candidate = active_dir / "transcript.jsonl"
+            if candidate.exists():
+                transcript_path = candidate
+        except OSError:
+            pass
+
+    if transcript_path is None:
+        # Find most recently modified transcript in akasha
+        akasha = agent_home / "akasha"
+        if akasha.exists():
+            candidates = sorted(
+                akasha.rglob("*transcript.jsonl"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                transcript_path = candidates[0]
+
+    if transcript_path is None:
+        console.print(f"\n  [red]No transcript found for agent:[/red] {agent}\n")
+        return
+
+    console.print(f"\n  [bold]Live transcript for {escape(agent)}[/bold] [dim]{transcript_path}[/dim]\n")
+
+    # Print last N lines then live-follow
+    raw_lines = transcript_path.read_text(encoding="utf-8").splitlines()
+    recent = raw_lines[-lines:] if len(raw_lines) > lines else raw_lines
+    _print_jsonl_lines(recent)
+
+    # Live follow
+    try:
+        with transcript_path.open("r", encoding="utf-8") as f:
+            f.seek(0, 2)  # seek to end
+            while True:
+                line = f.readline()
+                if not line:
+                    time.sleep(0.5)
+                    continue
+                line = line.strip()
+                if line:
+                    _print_jsonl_lines([line])
+    except KeyboardInterrupt:
+        pass
+
+
+def _print_jsonl_lines(raw_lines: list[str]) -> None:
+    """Parse and pretty-print JSONL transcript lines."""
+    sep = "─" * 60
+    for raw in raw_lines:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+
+        entry_type = entry.get("type", "unknown")
+        ts = entry.get("ts", "")
+        cycle = entry.get("cycle", "")
+        content = entry.get("content", "")
+        label = _ENTRY_LABELS.get(entry_type, entry_type)
+        color = _ENTRY_COLORS.get(entry_type, "white")
+
+        header_parts = [f"  [{color}]{escape(label)}[/{color}]"]
+        if ts:
+            header_parts.append(f"[dim]{escape(ts)}[/dim]")
+        if cycle:
+            header_parts.append(f"[dim]cycle {cycle}[/dim]")
+        console.print("  ".join(header_parts))
+
+        if content:
+            preview = content[:400] + (" ..." if len(content) > 400 else "")
+            console.print(f"  [dim]{escape(preview)}[/dim]")
+
+        console.print(f"  [dim]{sep}[/dim]")
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    cli()

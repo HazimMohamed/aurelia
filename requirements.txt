@@ -6,3 +6,5 @@ python-dotenv==1.0.1
 httpx==0.28.1
 ddgs>=9.0.0
 html2text>=2024.2.26
+rich>=13.0.0
+click>=8.1.0
