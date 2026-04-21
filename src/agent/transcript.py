@@ -60,16 +60,21 @@ def write_human_message(transcript_path: Path, content: str, cycle: int, sender:
     )
 
 
-def write_assistant_message(transcript_path: Path, content: str, cycle: int) -> None:
-    append_entry(
-        transcript_path,
-        {
-            "ts": _now_iso(),
-            "type": "assistant_message",
-            "content": content,
-            "cycle": cycle,
-        },
-    )
+def write_assistant_message(
+    transcript_path: Path,
+    content: str,
+    cycle: int,
+    thinking_blocks: list[dict] | None = None,
+) -> None:
+    entry: dict[str, Any] = {
+        "ts": _now_iso(),
+        "type": "assistant_message",
+        "content": content,
+        "cycle": cycle,
+    }
+    if thinking_blocks:
+        entry["thinking_blocks"] = thinking_blocks
+    append_entry(transcript_path, entry)
 
 
 def write_tool_call(
@@ -124,8 +129,13 @@ def write_bardo_complete(transcript_path: Path, incarnation_name: str, cycle: in
     )
 
 
-def transcript_to_messages(entries: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Convert transcript entries to Anthropic messages format (human/assistant pairs)."""
+def transcript_to_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert transcript entries to Anthropic messages format (human/assistant pairs).
+
+    If an assistant turn included thinking blocks they are reconstructed as a
+    content array — the Anthropic API requires thinking blocks to be present in
+    subsequent requests when extended thinking was enabled for that turn.
+    """
     messages = []
     for entry in entries:
         entry_type = entry.get("type")
@@ -133,5 +143,14 @@ def transcript_to_messages(entries: list[dict[str, Any]]) -> list[dict[str, str]
         if entry_type == "human_message" and content:
             messages.append({"role": "user", "content": content})
         elif entry_type == "assistant_message" and content:
-            messages.append({"role": "assistant", "content": content})
+            thinking_blocks = entry.get("thinking_blocks")
+            if thinking_blocks:
+                message_content: list[dict[str, Any]] = [
+                    {"type": "thinking", "thinking": tb["thinking"], "signature": tb["signature"]}
+                    for tb in thinking_blocks
+                ]
+                message_content.append({"type": "text", "text": content})
+                messages.append({"role": "assistant", "content": message_content})
+            else:
+                messages.append({"role": "assistant", "content": content})
     return messages

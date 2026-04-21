@@ -10,7 +10,7 @@ import json
 import socket
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from ..samsara.runtime_core import (
     AgentResponse,
@@ -123,6 +123,64 @@ class RuntimeClient:
             "payload": payload or {},
             "rebirth_from": rebirth_from,
         })
+
+    def dispatch_stream(
+        self,
+        agent: str,
+        incarnation: str,
+        hook: HookType,
+        payload: dict[str, Any],
+    ) -> Iterator[dict[str, Any]]:
+        """Open a streaming dispatch connection, yielding frame dicts until 'done'.
+
+        Keeps the socket open across multiple LLM calls (tool loop) — the caller
+        receives frames as they are produced without any buffering on our side.
+        """
+        request = {
+            "id": str(uuid.uuid4()),
+            "type": "dispatch",
+            "stream": True,
+            "agent": agent,
+            "incarnation": incarnation,
+            "hook": hook if isinstance(hook, str) else hook.value,
+            "payload": payload,
+        }
+        raw = json.dumps(request).encode("utf-8") + b"\n"
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.connect(str(self.socket_path))
+                sock.sendall(raw)
+                sock.settimeout(None)  # blocking reads — no timeout during streaming
+
+                buf = b""
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        frame = json.loads(line.decode("utf-8"))
+                        yield frame
+                        if frame.get("type") == "done":
+                            return
+
+        except (FileNotFoundError, ConnectionRefusedError) as e:
+            yield {
+                "type": "done",
+                "status": "error",
+                "error": "ConnectionError",
+                "message": (
+                    f"Cannot connect to runtime daemon at {self.socket_path}: {e}. "
+                    "Is the daemon running?"
+                ),
+            }
+        except json.JSONDecodeError as e:
+            yield {"type": "done", "status": "error", "error": "ParseError", "message": str(e)}
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 

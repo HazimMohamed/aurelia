@@ -57,6 +57,7 @@ class AgentConfig:
     weekly_budget_tokens: int = DEFAULT_WEEKLY_BUDGET
     heartbeat_interval_hours: Optional[float] = None
     discord_channel: str = ""
+    thinking_budget_tokens: Optional[int] = 8000
     home: Path = field(init=False)
 
     def __post_init__(self) -> None:
@@ -157,6 +158,15 @@ def load_agent_config(agent_name: str) -> AgentConfig:
 
     discord_channel = agent_data.get("discord_channel", agent_name)
 
+    # thinking_budget_tokens: explicit null in agent.json disables thinking
+    thinking_key = "thinking_budget_tokens"
+    if thinking_key in agent_data:
+        thinking_budget = agent_data[thinking_key]  # None disables it
+    elif thinking_key in defaults:
+        thinking_budget = defaults[thinking_key]
+    else:
+        thinking_budget = 8000
+
     return AgentConfig(
         name=agent_name,
         model=model,
@@ -165,6 +175,7 @@ def load_agent_config(agent_name: str) -> AgentConfig:
         weekly_budget_tokens=int(weekly_budget),
         heartbeat_interval_hours=heartbeat_hours,
         discord_channel=discord_channel,
+        thinking_budget_tokens=int(thinking_budget) if thinking_budget is not None else None,
     )
 
 

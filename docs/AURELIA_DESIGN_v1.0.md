@@ -792,8 +792,10 @@ src/
             core_tools.py       continue_task, memory_write, schedule_task,
                                 log_note, list_tools, dashboard_notification,
                                 shared_context_write, search_episodic
+            exec_tools.py       bash_exec — general-purpose shell execution
+                                (web search, file I/O, Python scripts, etc.)
             comms_tools.py      invite_agent, answer_phone
-            web_tools.py        web_search, web_fetch
+            web_tools.py        web_search, web_fetch (exists; not registered — superseded by bash_exec)
             agent_tools.py      Mayor tools (write_up, sos_alert, constitution_flag)
                                 Janitor tools (registry_reload, config_update)
 
@@ -1410,7 +1412,7 @@ def build_tool_registry(hook_type, agent_name, agent_config, incarnation_state, 
     registry = ToolRegistry()
 
     register_core_tools(registry, ...)   # always
-    register_web_tools(registry)         # always
+    register_exec_tools(registry, ...)   # always — bash_exec general compute primitive
 
     if hook_type in ("human_message", "heartbeat", "scheduled_task", "agent_invite"):
         register_comms_tools(registry, ...)
@@ -1425,8 +1427,7 @@ Core tools (available to every agent, every hook):
 ```
 continue_task              schedule_task            dashboard_notification
 memory_write               log_note                 shared_context_write
-search_episodic            list_tools
-web_search                 web_fetch
+search_episodic            list_tools               bash_exec
 invite_agent               answer_phone
 ```
 
@@ -1459,8 +1460,40 @@ Tool schemas match the Anthropic tool-use format. The canonical source is `src/a
 
 Returns null. Every call is logged to the transcript as a `tool_call` entry.
 
-**web_search** — DuckDuckGo search (via `ddgs`).
-**web_fetch** — HTTP GET + HTML-to-markdown conversion (via `html2text`). Response truncated to 20 000 chars.
+**bash_exec** — General-purpose shell execution. Working directory is the agent's home (`/home/{agent}`). Replaces the narrower `web_search` and `web_fetch` tools with a single compute primitive.
+
+```json
+{
+    "name": "bash_exec",
+    "input_schema": {
+        "properties": {
+            "command":         {"type": "string"},
+            "timeout_seconds": {"type": "integer", "default": 30},
+            "cwd":             {"type": "string"}
+        },
+        "required": ["command"]
+    }
+}
+```
+
+stdout truncated at 8 000 chars; stderr at 2 000 chars. Default timeout 30 s, max 120 s.
+
+Common patterns:
+```bash
+# Web search
+python3 -c "from ddgs import DDGS; [print(r) for r in DDGS().text('QUERY', max_results=5)]"
+
+# Fetch and render a URL
+curl -sL URL | python3 -m html2text
+
+# Read own memory
+cat ~/karma/semantic/core.jsonl
+
+# Run a script
+python3 ~/room/my_script.py
+```
+
+`web_tools.py` (`web_search`, `web_fetch`) still exists in the codebase but is no longer registered — `bash_exec` covers both use cases and more.
 
 **memory_write**
 ```json
@@ -1796,6 +1829,7 @@ These weren't on any milestone plan but emerged during build:
 - **Admin via Janitor.** No admin HTTP endpoints. Registry reloads, config edits, forced bardos, episodic promotions, and undissolves all go through the Janitor's elevated tools.
 - **`transport_group` Linux group.** A new OS-level group defining who can speak to the runtime. Agents are excluded from membership by design.
 - **`SO_PEERCRED` logging.** Every runtime request is logged with the caller's pid/uid/gid — structured accountability without any application-level token.
+- **`bash_exec` tool.** Added post-M3. A single general-purpose shell execution primitive that replaces the narrower `web_search` and `web_fetch` tools. Agents can search the web, fetch URLs, read their own memory, run Python scripts, and write files — all through one tool. `web_tools.py` still exists but is no longer registered.
 
 ### Milestone 4: Interface and Financial
 

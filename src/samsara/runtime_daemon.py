@@ -209,18 +209,22 @@ def _serialize(obj: Any) -> Any:
 
 
 def _handle_connection(conn: socket.socket) -> None:
-    """Handle one client connection: read JSON request, dispatch, write JSON response."""
+    """Handle one client connection: read JSON request, dispatch, write JSON response.
+
+    When the request includes "stream": true (only valid for "dispatch" type),
+    the connection stays open and intermediate frames are written as newline-
+    delimited JSON before a final {"type":"done"} frame closes the exchange.
+    """
     pid, uid, gid = _get_peer_cred(conn)
 
     with conn:
         try:
-            # Read until newline — simple framing
             buf = b""
             conn.settimeout(30.0)
             while b"\n" not in buf:
                 chunk = conn.recv(4096)
                 if not chunk:
-                    return  # client disconnected
+                    return
                 buf += chunk
 
             line, _ = buf.split(b"\n", 1)
@@ -230,12 +234,57 @@ def _handle_connection(conn: socket.socket) -> None:
             req_type = request.get("type", "unknown")
             agent = request.get("agent", "")
 
+            is_streaming = bool(request.get("stream")) and req_type == "dispatch"
+
+            if is_streaming:
+                # Remove timeout for the duration of the streamed response
+                conn.settimeout(None)
+
+                def send_frame(frame: dict[str, Any]) -> None:
+                    conn.sendall(json.dumps(frame).encode("utf-8") + b"\n")
+
+                t_start = time.monotonic()
+                try:
+                    result = runtime.dispatch(
+                        agent=request["agent"],
+                        incarnation=request["incarnation"],
+                        hook=HookType(request["hook"]),
+                        payload=request.get("payload", {}),
+                        stream_callback=send_frame,
+                    )
+                    duration_ms = int((time.monotonic() - t_start) * 1000)
+                    send_frame({
+                        "type": "done",
+                        "id": req_id,
+                        "status": "ok",
+                        "data": _serialize(result),
+                    })
+                    log.info(
+                        f"{_now_iso()} pid={pid} uid={uid} gid={gid} "
+                        f"type={req_type} agent={agent} status=ok stream=true duration_ms={duration_ms}"
+                    )
+                except Exception as exc:
+                    duration_ms = int((time.monotonic() - t_start) * 1000)
+                    send_frame({
+                        "type": "done",
+                        "id": req_id,
+                        "status": "error",
+                        "error": type(exc).__name__,
+                        "message": str(exc),
+                    })
+                    log.error(
+                        f"{_now_iso()} pid={pid} uid={uid} gid={gid} "
+                        f"type={req_type} agent={agent} status=error stream=true "
+                        f"duration_ms={duration_ms} error={type(exc).__name__}: {exc}"
+                    )
+                return
+
+            # ── Non-streaming path (unchanged) ──────────────────────────────────
             t_start = time.monotonic()
 
             try:
                 result = _dispatch(request)
                 duration_ms = int((time.monotonic() - t_start) * 1000)
-
                 response = {
                     "id": req_id,
                     "status": "ok",

@@ -15,6 +15,7 @@ if _env_path.exists():
     load_dotenv(_env_path)
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
 from .client import client as runtime
@@ -174,6 +175,115 @@ class ProcessRequest(BaseModel):
     payload: Optional[dict[str, Any]] = None
 
 
+# ── Shared helpers ─────────────────────────────────────────────────────────────
+
+def _resolve_active_incarnation(agent_name: str, incarnation_id: Optional[str]):
+    """Find or spawn the active incarnation for a message request.
+
+    Returns an IncarnationSummary. Raises HTTPException on any routing failure.
+    """
+    if incarnation_id:
+        incarnations = runtime.list_incarnations(agent_name)
+        target = next((i for i in incarnations if i.name == incarnation_id), None)
+        if not target:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Incarnation '{incarnation_id}' not found for agent '{agent_name}'",
+            )
+        if target.status != "active":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Incarnation '{incarnation_id}' is not active (status: {target.status})",
+            )
+        return target
+
+    incarnations = runtime.list_incarnations(agent_name)
+    active = next((i for i in incarnations if i.status == "active"), None)
+    if not active:
+        try:
+            active = runtime.spawn(agent_name)
+        except RuntimeError as e:
+            if "IncarnationAlreadyActive" in str(e):
+                incarnations = runtime.list_incarnations(agent_name)
+                active = next((i for i in incarnations if i.status == "active"), None)
+                if not active:
+                    raise HTTPException(status_code=500, detail=str(e))
+            else:
+                raise _runtime_error_to_http(e)
+    return active
+
+
+def _sse(event: str, data: dict) -> str:
+    """Format a single Server-Sent Event."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _socket_frames_to_sse(frames, agent_name: str, active_inc) -> Iterator[str]:
+    """Translate raw socket stream frames into SSE events for the browser.
+
+    Socket protocol (flat, internal) → SSE format (named events, Anthropic-aligned):
+
+        thinking_delta  → content_block_delta  {delta: {type: thinking_delta, thinking: ...}}
+        delta           → content_block_delta  {delta: {type: text_delta, text: ...}}
+        tool_call       → tool_use             {id, name, input}
+        tool_result     → tool_result          {tool_use_id, result}
+        done            → message_stop         {stop_reason, agent, incarnation, cycle}
+    """
+    yield _sse("message_start", {
+        "type": "message_start",
+        "agent": agent_name,
+        "incarnation": active_inc.name,
+        "cycle": active_inc.cycle,
+    })
+
+    for frame in frames:
+        frame_type = frame.get("type")
+
+        if frame_type == "thinking_delta":
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta",
+                "delta": {"type": "thinking_delta", "thinking": frame.get("content", "")},
+            })
+
+        elif frame_type == "delta":
+            yield _sse("content_block_delta", {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": frame.get("content", "")},
+            })
+
+        elif frame_type == "tool_call":
+            yield _sse("tool_use", {
+                "type": "tool_use",
+                "id": frame.get("tool_use_id", ""),
+                "name": frame.get("name", ""),
+                "input": frame.get("input", {}),
+            })
+
+        elif frame_type == "tool_result":
+            yield _sse("tool_result", {
+                "type": "tool_result",
+                "tool_use_id": frame.get("tool_use_id", ""),
+                "result": frame.get("result"),
+            })
+
+        elif frame_type == "done":
+            done_data = frame.get("data") or {}
+            if frame.get("status") == "error":
+                yield _sse("error", {
+                    "type": "error",
+                    "error": frame.get("error", "UnknownError"),
+                    "message": frame.get("message", ""),
+                })
+            yield _sse("message_stop", {
+                "type": "message_stop",
+                "stop_reason": "end_turn" if frame.get("status") == "ok" else "error",
+                "agent": done_data.get("agent", agent_name),
+                "incarnation": done_data.get("incarnation", active_inc.name),
+                "cycle": done_data.get("cycle", active_inc.cycle),
+            })
+            return
+
+
 # ── Public endpoints ───────────────────────────────────────────────────────────
 
 @app.post("/message", response_model=MessageResponse)
@@ -186,41 +296,7 @@ def post_message(req: MessageRequest) -> MessageResponse:
     _require_agent(agent_name)
 
     try:
-        if req.to.incarnation_id:
-            # Explicit incarnation requested — validate it exists and is active
-            incarnations = runtime.list_incarnations(agent_name)
-            target = next(
-                (i for i in incarnations if i.name == req.to.incarnation_id),
-                None,
-            )
-            if not target:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Incarnation '{req.to.incarnation_id}' not found for agent '{agent_name}'",
-                )
-            if target.status != "active":
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Incarnation '{req.to.incarnation_id}' is not active (status: {target.status})",
-                )
-            active_inc = target
-        else:
-            # Find active or spawn
-            incarnations = runtime.list_incarnations(agent_name)
-            active_inc = next((i for i in incarnations if i.status == "active"), None)
-            if not active_inc:
-                try:
-                    active_inc = runtime.spawn(agent_name)
-                except RuntimeError as e:
-                    if "IncarnationAlreadyActive" in str(e):
-                        # Race condition: someone spawned between list and spawn — re-query
-                        incarnations = runtime.list_incarnations(agent_name)
-                        active_inc = next((i for i in incarnations if i.status == "active"), None)
-                        if not active_inc:
-                            raise HTTPException(status_code=500, detail=str(e))
-                    else:
-                        raise _runtime_error_to_http(e)
-
+        active_inc = _resolve_active_incarnation(agent_name, req.to.incarnation_id)
         sender = req.from_ or "god-lite"
         response = runtime.dispatch(
             agent=agent_name,
@@ -242,6 +318,53 @@ def post_message(req: MessageRequest) -> MessageResponse:
         incarnation=response.incarnation,
         cycle=response.cycle,
         content=response.content,
+    )
+
+
+@app.post("/message/stream")
+def post_message_stream(req: MessageRequest) -> StreamingResponse:
+    """Streaming variant of POST /message. Returns text/event-stream (SSE).
+
+    Events mirror Anthropic's streaming format where applicable:
+      message_start       — agent / incarnation / cycle metadata
+      content_block_delta — {delta: {type: thinking_delta|text_delta, ...}}
+      tool_use            — tool call about to execute {id, name, input}
+      tool_result         — tool execution result {tool_use_id, result}
+      message_stop        — final event with stop_reason and updated cycle
+      error               — sent before message_stop if the cycle failed
+    """
+    agent_name = req.to.agent
+    if not agent_name:
+        raise HTTPException(status_code=400, detail="'to.agent' is required")
+
+    _require_agent(agent_name)
+
+    try:
+        active_inc = _resolve_active_incarnation(agent_name, req.to.incarnation_id)
+    except HTTPException:
+        raise
+    except (RuntimeError, ConnectionError) as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    sender = req.from_ or "god-lite"
+    payload = {"content": req.content, "sender": sender}
+
+    def generate() -> Iterator[str]:
+        frames = runtime.dispatch_stream(
+            agent=agent_name,
+            incarnation=active_inc.name,
+            hook=HookType.HUMAN_MESSAGE,
+            payload=payload,
+        )
+        yield from _socket_frames_to_sse(frames, agent_name, active_inc)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable nginx buffering if behind a proxy
+        },
     )
 
 

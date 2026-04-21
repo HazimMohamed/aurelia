@@ -16,7 +16,7 @@ from ..agent.incarnation import (
     load_incarnation,
     get_incarnation_by_id,
 )
-from ..agent.core import run_agent_cycle_and_parse
+from ..agent.core import run_agent_cycle_and_parse, StreamCallback
 from ..memory.bardo import run_bardo
 from .scheduler import count_pending_for_agent
 from ..agent.transcript import read_entries
@@ -125,6 +125,7 @@ def dispatch(
     incarnation: str,
     hook: HookType,
     payload: dict[str, Any],
+    stream_callback: Optional[StreamCallback] = None,
 ) -> AgentResponse:
     """
     Send a hook payload to a specific incarnation.
@@ -170,6 +171,7 @@ def dispatch(
         sender=sender,
         hook_type=hook,
         tool_registry=tool_registry,
+        stream_callback=stream_callback,
     )
 
     # Trigger bardo if agent signalled done
