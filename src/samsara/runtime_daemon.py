@@ -135,6 +135,12 @@ def _dispatch(request: dict[str, Any]) -> Any:
             registry = runtime.get_registry()
             registry._refresh()
             return {"status": "reloaded", "agents": registry.all_agents()}
+        case "scheduler_tick":
+            scheduler = getattr(runtime, "_scheduler", None)
+            if scheduler is None:
+                raise RuntimeError("Scheduler not available")
+            scheduler.tick_now()
+            return {"status": "ticked"}
         case _:
             raise ValueError(f"Unknown request type: {req_type!r}")
 
@@ -355,6 +361,7 @@ def main() -> None:
     # Start scheduler as a background thread — same process, no IPC needed
     from .scheduler import SchedulerDaemon
     scheduler = SchedulerDaemon()
+    runtime._scheduler = scheduler  # expose for socket command handler
     scheduler_thread = threading.Thread(target=scheduler.run, daemon=True, name="scheduler")
     scheduler_thread.start()
     log.info("[runtime_daemon] Scheduler thread started")

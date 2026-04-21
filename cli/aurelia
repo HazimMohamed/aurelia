@@ -391,7 +391,7 @@ def cmd_start(with_http: bool) -> None:
             console.print(f"  [red]✗ Failed to start runtime daemon:[/red] {e}\n")
             return
 
-        console.print("  [dim]Waiting for runtime socket...[/dim]", end="", flush=True)
+        console.print("  [dim]Waiting for runtime socket...[/dim]", end="")
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             if SOCKET_PATH.exists() and _runtime_ok():
@@ -672,6 +672,131 @@ def cmd_agent_spawn(name: str, goal: str | None) -> None:
     console.print()
 
 
+@cmd_agent.command("reset")
+@click.argument("name")
+@click.option("--hard", is_flag=True, help="Also wipe identity/ and re-seed from defaults.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
+    """Reset an agent to blank-slate (wipes karma, akasha, room).
+
+    Safe to call at the start of integration tests.
+    Blocked entirely when AURELIA_PRODUCTION is set.
+    """
+    if os.environ.get("AURELIA_PRODUCTION"):
+        console.print("\n  [bold red]✗ Reset is disabled in production (AURELIA_PRODUCTION is set)[/bold red]\n")
+        raise SystemExit(1)
+
+    agent_home = Path("/home") / name
+    if not agent_home.exists():
+        console.print(f"\n  [red]✗ Agent home not found:[/red] {agent_home}\n")
+        raise SystemExit(1)
+
+    scope = "karma, akasha, room" + (", identity" if hard else "")
+    console.print(f"\n  [bold yellow]Reset agent:[/bold yellow] {escape(name)}")
+    console.print(f"  [dim]Scope: {scope}[/dim]")
+
+    if not yes:
+        click.confirm("\n  Are you sure?", default=False, abort=True)
+
+    # Stop agent daemon if running
+    pid_name = f"agent-{name}"
+    pid = _read_pid(pid_name)
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not _pid_alive(pid):
+                    break
+                time.sleep(0.1)
+            console.print(f"  [dim]Stopped agent daemon (pid={pid})[/dim]")
+        except OSError:
+            pass
+        (PIDS_DIR / f"{pid_name}.pid").unlink(missing_ok=True)
+
+    import shutil
+
+    def _wipe_dir(path: Path) -> None:
+        if path.exists():
+            shutil.rmtree(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+    def _wipe_glob(pattern_dir: Path, pattern: str = "*") -> None:
+        if pattern_dir.exists():
+            for f in pattern_dir.glob(pattern):
+                if f.is_file():
+                    f.unlink()
+                elif f.is_dir():
+                    shutil.rmtree(f)
+
+    # Remove karma/current symlink
+    current_link = agent_home / "karma" / "current"
+    if current_link.is_symlink():
+        current_link.unlink()
+
+    # Wipe episodic dirs
+    _wipe_dir(agent_home / "karma" / "episodic" / "core")
+    _wipe_dir(agent_home / "karma" / "episodic" / "extended")
+
+    # Wipe semantic extended; reset semantic core to empty file
+    _wipe_dir(agent_home / "karma" / "semantic" / "extended")
+    semantic_core = agent_home / "karma" / "semantic" / "core.jsonl"
+    semantic_core.write_text("")
+
+    # Wipe akasha and room
+    _wipe_dir(agent_home / "akasha")
+    _wipe_dir(agent_home / "room")
+
+    if hard:
+        _wipe_dir(agent_home / "identity")
+        # Re-seed identity files with defaults
+        (agent_home / "identity" / "character.md").write_text(
+            f"# Character\n\nThis is {name.capitalize()}'s character file."
+            " It will be populated over time through interactions and bardo reflections.\n\n"
+            "Initial state: blank slate within the constraints of the constitution."
+        )
+        (agent_home / "identity" / "contract.md").write_text(
+            "# Contract\n\n## Commitments\n"
+            "- Be present when Hazim arrives\n"
+            "- Be honest, not just agreeable\n"
+            "- Remember what matters across incarnations\n"
+            "- Do your job without overstepping\n\n"
+            "## Boundaries\n"
+            "- Do not contact other agents without authorization (M1: no inter-agent comms)\n"
+            "- Do not act outside your domain without explicit permission\n"
+            "- Do not fabricate memory you do not have"
+        )
+        (agent_home / "identity" / "values.md").write_text(
+            f"# Values\n\nThese values guide {name.capitalize()}'s behavior within its domain.\n\n"
+            "- Honesty over comfort\n"
+            "- Depth over performance\n"
+            "- Memory over repetition\n"
+            "- Presence over agenda"
+        )
+
+    console.print(f"\n  [green]✓ {escape(name)} reset to blank slate[/green]")
+    if hard:
+        console.print("  [dim]Identity files re-seeded[/dim]")
+
+    # Restart the agent daemon
+    env = _load_env()
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "src.samsara.agent_daemon", name],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        (PIDS_DIR / f"{pid_name}.pid").write_text(str(proc.pid))
+        console.print(f"  [green]✓ Agent daemon restarted (pid={proc.pid})[/green]")
+    except Exception as e:
+        console.print(f"  [yellow]~ Could not restart agent daemon:[/yellow] {e}")
+
+    console.print()
+
+
 @cmd_agent.command("bardo")
 @click.argument("name")
 def cmd_agent_bardo(name: str) -> None:
@@ -708,6 +833,29 @@ def cmd_agent_bardo(name: str) -> None:
     else:
         console.print("  [green]✓ Bardo complete[/green]")
     console.print()
+
+
+# ── aurelia scheduler ─────────────────────────────────────────────────────────
+
+@cli.group("scheduler")
+def cmd_scheduler() -> None:
+    """Scheduler controls."""
+
+
+@cmd_scheduler.command("tick")
+def cmd_scheduler_tick() -> None:
+    """Wake the scheduler immediately — fires any due items right now.
+
+    Useful in tests (after enqueuing a task) and for manual triggering in production.
+    Set AURELIA_SCHEDULER_INTERVAL=N to change the baseline poll interval.
+    """
+    if not _require_runtime():
+        return
+    ok, data = _socket_call({"type": "scheduler_tick"})
+    if ok:
+        console.print("\n  [green]✓ Scheduler ticked[/green] — due items will fire now\n")
+    else:
+        console.print(f"\n  [red]✗ Tick failed:[/red] {data}\n")
 
 
 # ── aurelia message ───────────────────────────────────────────────────────────

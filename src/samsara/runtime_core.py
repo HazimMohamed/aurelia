@@ -445,6 +445,12 @@ def process_scheduled_item(item: dict) -> dict:
     if not active:
         active = spawn(agent, goal=payload.get("goal"))
 
+    # Build the hook prompt so dispatch gets non-empty content
+    goal = payload.get("goal", "")
+    rebirth_from = payload.get("rebirth_from")
+    prompt = build_hook_prompt(agent, hook.value if hasattr(hook, "value") else hook, goal, payload, rebirth_from)
+    payload["content"] = prompt
+
     return dispatch(agent, active.name, hook, payload).__dict__
 
 

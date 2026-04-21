@@ -102,6 +102,10 @@ class RuntimeClient:
         """Force the agent registry to reload in the daemon."""
         return self._call({"type": "registry_reload"})
 
+    def scheduler_tick(self) -> dict[str, Any]:
+        """Wake the scheduler immediately — useful for tests and manual triggering."""
+        return self._call({"type": "scheduler_tick"})
+
     def internal_process(
         self,
         agent: str,

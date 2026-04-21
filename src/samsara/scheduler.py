@@ -14,7 +14,8 @@ COMPLETED_DIR = SCHEDULER_BASE / "completed"
 FAILED_DIR = SCHEDULER_BASE / "failed"
 FIFO_BASE = Path("/var/aurelia/queue")
 
-SCHEDULER_CHECK_INTERVAL = 60  # seconds
+import os
+SCHEDULER_CHECK_INTERVAL = int(os.environ.get("AURELIA_SCHEDULER_INTERVAL", "60"))
 
 # Typed action whitelist (infra code, agents cannot extend)
 ALLOWED_TYPES = {
@@ -253,10 +254,15 @@ class SchedulerDaemon:
     """Background scheduler that fires due items. Runs as a thread inside the runtime daemon."""
 
     def __init__(self) -> None:
+        import threading
         self._running = False
+        self._wake = threading.Event()
+
+    def tick_now(self) -> None:
+        """Wake the scheduler immediately — skips the current sleep interval."""
+        self._wake.set()
 
     def run(self) -> None:
-        import time
         self._running = True
         print(f"[scheduler] Started. Check interval: {SCHEDULER_CHECK_INTERVAL}s")
         while self._running:
@@ -264,7 +270,8 @@ class SchedulerDaemon:
                 self._tick()
             except Exception as e:
                 print(f"[scheduler] Error in tick: {e}")
-            time.sleep(SCHEDULER_CHECK_INTERVAL)
+            self._wake.wait(timeout=SCHEDULER_CHECK_INTERVAL)
+            self._wake.clear()
 
     def _tick(self) -> None:
         now = datetime.now(timezone.utc)
