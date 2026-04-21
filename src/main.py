@@ -1,12 +1,10 @@
-"""Aurelia Milestone 3 — FastAPI server."""
+"""Aurelia HTTP transport — thin wrapper over src/runtime.py."""
 
 from __future__ import annotations
 
 import json
 import os
 import secrets
-import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,10 +17,13 @@ if _env_path.exists():
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
-from .registry import AgentRegistry
-from .incarnation import get_or_spawn_incarnation, get_incarnation_by_id, spawn_incarnation
-from .core import run_agent_cycle, run_agent_cycle_and_parse
-from .bardo import run_bardo
+from . import runtime
+from .runtime import (
+    AgentNotFound,
+    IncarnationAlreadyActive,
+    IncarnationNotActive,
+    IncarnationNotFound,
+)
 from .config import AgentConfig, GLOBAL_CONFIG_PATH
 from .hooks import (
     HookType,
@@ -39,13 +40,11 @@ from .scheduler import (
     count_pending_for_agent,
     _parse_when,
 )
-from .context import load_recent_episodic_summary, load_episodic_extended
-from .incarnation import get_active_incarnation
 
-app = FastAPI(title="Aurelia", version="0.3.0")
+app = FastAPI(title="Aurelia", version="0.4.0")
 
-# Global registry — initialized once on startup
-registry = AgentRegistry()
+# Registry exposed from runtime module (single instance)
+registry = runtime.get_registry()
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -58,7 +57,6 @@ def _load_global_config() -> dict:
 
 
 def _get_agent_token(agent_name: str) -> Optional[str]:
-    """Return bearer token for an agent, or None if not configured."""
     cfg = _load_global_config()
     return cfg.get("agents", {}).get(agent_name, {}).get("token")
 
@@ -78,7 +76,7 @@ def _verify_janitor_token(provided_token: str) -> bool:
 def _authenticate_agent(
     authorization: Optional[str] = Header(default=None),
 ) -> Optional[AgentConfig]:
-    """Dependency: authenticate an agent from Bearer token. Returns None if no auth configured."""
+    """Dependency: authenticate an agent from Bearer token."""
     if not authorization or not authorization.startswith("Bearer "):
         return None
     token = authorization[len("Bearer "):]
@@ -160,11 +158,12 @@ class ProcessRequest(BaseModel):
 
 @app.post("/message", response_model=MessageResponse)
 def post_message(req: MessageRequest) -> MessageResponse:
-    """Send a human message to an agent and receive a response."""
+    """Send a human message to an agent. Finds active incarnation or spawns one."""
     agent_name = req.to.agent
     if not agent_name:
         raise HTTPException(status_code=400, detail="'to.agent' is required")
 
+    # Validate agent exists
     config = registry.get(agent_name)
     if not config:
         raise HTTPException(
@@ -172,62 +171,181 @@ def post_message(req: MessageRequest) -> MessageResponse:
             detail=f"Agent '{agent_name}' not found. Run scripts/setup_agent.sh to create it.",
         )
 
+    # Transport-level policy: find active incarnation or spawn one
     if req.to.incarnation_id:
+        # Explicit incarnation requested — validate it exists
         try:
-            incarnation_state = get_incarnation_by_id(config, req.to.incarnation_id)
-        except ValueError as e:
+            incarnations = runtime.list_incarnations(agent_name)
+        except AgentNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
+
+        target = next(
+            (i for i in incarnations if i.name == req.to.incarnation_id),
+            None,
+        )
+        if not target:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Incarnation '{req.to.incarnation_id}' not found for agent '{agent_name}'",
+            )
+        if target.status != "active":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Incarnation '{req.to.incarnation_id}' is not active (status: {target.status})",
+            )
+        active_inc = target
     else:
-        incarnation_state = get_or_spawn_incarnation(config)
+        # Find active or spawn
+        incarnations = runtime.list_incarnations(agent_name)
+        active_inc = next((i for i in incarnations if i.status == "active"), None)
+        if not active_inc:
+            try:
+                active_inc = runtime.spawn(agent_name)
+            except IncarnationAlreadyActive as e:
+                # Race condition: someone spawned between list and spawn — re-query
+                incarnations = runtime.list_incarnations(agent_name)
+                active_inc = next((i for i in incarnations if i.status == "active"), None)
+                if not active_inc:
+                    raise HTTPException(status_code=500, detail=str(e))
 
     sender = req.from_ or "god-lite"
 
-    from .tools.registry import build_tool_registry
-    tool_registry = build_tool_registry(
-        hook_type=HookType.HUMAN_MESSAGE,
-        agent_name=agent_name,
-        agent_config=config,
-        incarnation_state=incarnation_state,
-    )
-
     try:
-        response_text, next_action = run_agent_cycle_and_parse(
-            config=config,
-            incarnation_state=incarnation_state,
-            human_content=req.content,
-            sender=sender,
-            hook_type=HookType.HUMAN_MESSAGE,
-            tool_registry=tool_registry,
+        response = runtime.dispatch(
+            agent=agent_name,
+            incarnation=active_inc.name,
+            hook=HookType.HUMAN_MESSAGE,
+            payload={"content": req.content, "sender": sender},
         )
+    except (IncarnationNotFound, IncarnationNotActive) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent cycle failed: {e}")
 
-    # Handle next action
-    action_type = next_action.get("type", "sleep")
-    if action_type == "done":
-        active_name = get_active_incarnation(config)
-        if active_name:
-            try:
-                run_bardo(config, active_name)
-            except Exception as e:
-                print(f"[main] Bardo after done failed: {e}")
-
     return MessageResponse(
-        agent=agent_name,
-        incarnation=incarnation_state["name"],
-        cycle=incarnation_state["cycle"],
-        content=response_text,
+        agent=response.agent,
+        incarnation=response.incarnation,
+        cycle=response.cycle,
+        content=response.content,
     )
 
+
+@app.get("/health")
+def get_health() -> dict:
+    """Return health status for all known agents."""
+    report = runtime.get_health()
+
+    agents_out = {}
+    for summary in report.agents:
+        entry: dict[str, Any] = {"status": summary.status}
+        if summary.incarnation:
+            entry["incarnation"] = summary.incarnation
+        if summary.cycle is not None:
+            entry["cycle"] = summary.cycle
+        if summary.last_active:
+            entry["last_active"] = summary.last_active
+        if summary.budget_remaining is not None:
+            entry["budget_remaining"] = summary.budget_remaining
+        if summary.weekly_budget is not None:
+            entry["weekly_budget"] = summary.weekly_budget
+        entry["scheduler_queue"] = summary.scheduler_queue
+
+        if registry.get(summary.name):
+            budget_info = runtime.get_budget_info(summary.name)
+            entry["budget_status"] = budget_info.get("status", "active")
+            entry["tokens_used_this_week"] = budget_info.get("tokens_used", 0)
+
+        agents_out[summary.name] = entry
+
+    return {
+        "status": report.status,
+        "agents": agents_out,
+        "pending_dashboard": report.pending_dashboard,
+    }
+
+
+@app.get("/history/{agent_name}/{incarnation_id}")
+def get_history(agent_name: str, incarnation_id: str) -> dict:
+    """Return transcript for a specific incarnation."""
+    try:
+        entries = runtime.get_history(agent_name, incarnation_id)
+    except AgentNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except IncarnationNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {
+        "agent": agent_name,
+        "incarnation": incarnation_id,
+        "entries": [
+            {
+                "ts": e.ts,
+                "type": e.type,
+                "content": e.content,
+                "cycle": e.cycle,
+                **e.extra,
+            }
+            for e in entries
+        ],
+    }
+
+
+@app.get("/history/{agent_name}")
+def list_agent_incarnations(agent_name: str) -> dict:
+    """List all incarnations for an agent."""
+    try:
+        incarnations = runtime.list_incarnations(agent_name)
+    except AgentNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    return {
+        "agent": agent_name,
+        "incarnations": [
+            {
+                "name": i.name,
+                "status": i.status,
+                "cycle": i.cycle,
+                "last_active": i.last_active,
+            }
+            for i in incarnations
+        ],
+    }
+
+
+@app.get("/agents")
+def list_agents() -> dict:
+    """List all registered agents and their status."""
+    agents = runtime.list_agents()
+    return {
+        "agents": [
+            {
+                "name": a.name,
+                "status": a.status,
+                "incarnation": a.incarnation,
+                "cycle": a.cycle,
+                "last_active": a.last_active,
+                "budget_remaining": a.budget_remaining,
+                "weekly_budget": a.weekly_budget,
+                "scheduler_queue": a.scheduler_queue,
+            }
+            for a in agents
+        ]
+    }
+
+
+# ── Bardo (manual testing tool) ───────────────────────────────────────────────
 
 @app.post("/bardo/{agent_name}", response_model=BardoResponse)
 def post_bardo(agent_name: str) -> BardoResponse:
     """Manually trigger bardo for an agent's active incarnation."""
-    config = registry.get(agent_name)
-    if not config:
+    if not registry.get(agent_name):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
 
-    active = get_active_incarnation(config)
+    try:
+        active = runtime.get_active(agent_name)
+    except AgentNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     if not active:
         raise HTTPException(
             status_code=409,
@@ -235,7 +353,7 @@ def post_bardo(agent_name: str) -> BardoResponse:
         )
 
     try:
-        result = run_bardo(config, active)
+        result = runtime.trigger_bardo(agent_name, active)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bardo failed: {e}")
 
@@ -249,46 +367,11 @@ def post_bardo(agent_name: str) -> BardoResponse:
     )
 
 
-@app.get("/health")
-def get_health() -> dict:
-    """Return health status for all known agents, including budget remaining."""
-    from .budget import get_budget_remaining, load_budget
-
-    agents = {}
-    for agent_name in registry.all_agents():
-        config = registry.get(agent_name)
-        status = registry.agent_status(agent_name)
-        status["scheduler_queue"] = count_pending_for_agent(agent_name)
-
-        if config:
-            budget_data = load_budget(agent_name)
-            status["budget_remaining"] = get_budget_remaining(config)
-            status["budget_status"] = budget_data.get("status", "active")
-            status["tokens_used_this_week"] = budget_data.get("tokens_used", 0)
-            status["weekly_budget"] = config.weekly_budget_tokens
-
-        agents[agent_name] = status
-
-    # Count dashboard queue
-    from pathlib import Path
-    dashboard_queue = Path("/var/aurelia/dashboard/queue")
-    pending_dashboard = len(list(dashboard_queue.glob("*.json"))) if dashboard_queue.exists() else 0
-
-    return {
-        "status": "healthy",
-        "agents": agents,
-        "pending_dashboard": pending_dashboard,
-    }
-
-
 # ── Internal endpoints ─────────────────────────────────────────────────────────
 
 @app.post("/internal/process")
 def internal_process(req: ProcessRequest) -> dict:
-    """
-    Process a scheduled work item (called by scheduler daemon or agent daemon).
-    Runs the appropriate hook for the agent.
-    """
+    """Process a scheduled work item (called by scheduler daemon or agent daemon)."""
     agent_name = req.agent
     config = registry.get(agent_name)
     if not config:
@@ -302,68 +385,29 @@ def internal_process(req: ProcessRequest) -> dict:
         if not heartbeat_precheck(config):
             return {"status": "skipped", "reason": "heartbeat_precheck_false", "agent": agent_name}
 
-    # Build hook prompt
-    if hook_type == HookType.HEARTBEAT:
-        # Load recent episodic context for heartbeat
-        episodic_context = load_recent_episodic_summary(config)
-        prompt_parts = []
-        if episodic_context:
-            prompt_parts.append(episodic_context)
-        prompt_parts.append(format_heartbeat_prompt(config))
-        hook_prompt = "\n\n".join(prompt_parts)
-
-    elif hook_type == HookType.SCHEDULED_TASK:
-        task_payload = {
-            "goal": req.goal,
-            "type": hook_type,
-            **payload,
-        }
-        prompt_parts = []
-        if req.rebirth_from:
-            rebirth_context = load_episodic_extended(config, req.rebirth_from)
-            if rebirth_context:
-                prompt_parts.append(rebirth_context)
-        prompt_parts.append(format_task_goal(task_payload))
-        hook_prompt = "\n\n".join(prompt_parts)
-
-    elif hook_type == "agent_invite":
-        hook_prompt = format_agent_invite(payload)
-
-    else:
-        hook_prompt = req.goal or "You have been woken up. Do your work."
-
-    # For autonomous hooks, spawn a fresh incarnation
-    incarnation_state = spawn_incarnation_for_hook(config, hook_type)
-
-    from .tools.registry import build_tool_registry
-    tool_registry = build_tool_registry(
+    # Build hook prompt via runtime (keeps context/hooks imports out of main)
+    hook_prompt = runtime.build_hook_prompt(
+        agent=agent_name,
         hook_type=hook_type,
-        agent_name=agent_name,
-        agent_config=config,
-        incarnation_state=incarnation_state,
+        goal=req.goal or "",
+        payload=payload,
+        rebirth_from=req.rebirth_from,
     )
 
+    # Spawn fresh incarnation for autonomous hooks
+    incarnation_state = runtime.spawn_fresh_for_hook(agent_name, hook_type)
+
     try:
-        response_text, next_action = run_agent_cycle_and_parse(
-            config=config,
-            incarnation_state=incarnation_state,
-            human_content=hook_prompt,
-            sender="scheduler",
+        response_text, next_action = runtime.run_hook(
+            agent=agent_name,
             hook_type=hook_type,
-            tool_registry=tool_registry,
+            hook_prompt=hook_prompt,
+            incarnation_state=incarnation_state,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Hook cycle failed: {e}")
 
-    # Handle next action
     action_type = next_action.get("type", "sleep")
-    if action_type == "done":
-        active_name = get_active_incarnation(config)
-        if active_name:
-            try:
-                run_bardo(config, active_name)
-            except Exception as e:
-                print(f"[internal/process] Bardo after done failed: {e}")
 
     return {
         "status": "ok",
@@ -374,37 +418,12 @@ def internal_process(req: ProcessRequest) -> dict:
     }
 
 
-def spawn_incarnation_for_hook(config: AgentConfig, hook_type: str) -> dict:
-    """
-    For autonomous hooks (heartbeat, scheduled_task, agent_invite):
-    spawn a fresh incarnation. For human_message: get or spawn.
-    """
-    if hook_type == HookType.HUMAN_MESSAGE:
-        return get_or_spawn_incarnation(config)
-    else:
-        # Force a fresh incarnation for each autonomous wakeup
-        # First, clean up any existing active incarnation (but don't bardo it here)
-        from .incarnation import get_active_incarnation as _get_active
-        active = _get_active(config)
-        if active:
-            # Remove current symlink so spawn creates fresh
-            if config.current_symlink.is_symlink():
-                config.current_symlink.unlink()
-        incarnation_name = spawn_incarnation(config)
-        from .incarnation import load_incarnation
-        return load_incarnation(config, incarnation_name)
-
-
 @app.post("/internal/schedule")
 def internal_schedule(
     req: ScheduleRequest,
     agent: Optional[AgentConfig] = Depends(_authenticate_agent),
 ) -> dict:
-    """
-    Schedule a work item. Agents call this to schedule future incarnations.
-    Enforces typed action whitelist and Janitor-only types.
-    """
-    # Validate action type
+    """Schedule a work item. Agents call this to schedule future incarnations."""
     all_allowed = ALLOWED_TYPES | JANITOR_ONLY_TYPES
     if req.type not in all_allowed:
         raise HTTPException(
@@ -412,7 +431,6 @@ def internal_schedule(
             detail=f"Unknown type '{req.type}'. Allowed: {sorted(ALLOWED_TYPES)}",
         )
 
-    # Janitor-only type enforcement
     if req.type in JANITOR_ONLY_TYPES:
         if agent is None or agent.name != "janitor":
             raise HTTPException(
@@ -420,8 +438,6 @@ def internal_schedule(
                 detail="Janitor-only type requires authenticated Janitor agent",
             )
 
-    # Agents can only schedule for themselves (unless Janitor or agent_invite type)
-    # agent_invite is allowed to target other agents — that's its whole purpose
     is_janitor = agent is not None and agent.name == "janitor"
     is_invite = req.type == "agent_invite"
     if req.agent != (agent.name if agent else req.agent):
@@ -431,12 +447,10 @@ def internal_schedule(
                 detail="Agents can only schedule tasks for themselves",
             )
 
-    # Verify target agent exists
     target_config = registry.get(req.agent)
     if not target_config:
         raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found")
 
-    # Parse trigger time
     trigger_dt = _parse_when(req.when)
     trigger_time = trigger_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -461,20 +475,20 @@ def internal_schedule(
 
 @app.post("/internal/bardo/{agent_name}")
 def internal_bardo(agent_name: str, request: Optional[dict] = None) -> dict:
-    """
-    Internal bardo trigger (used by invite_agent). Forced bardo on active incarnation.
-    Non-fatal if no active incarnation exists.
-    """
-    config = registry.get(agent_name)
-    if not config:
+    """Internal bardo trigger. Non-fatal if no active incarnation exists."""
+    if not registry.get(agent_name):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
 
-    active = get_active_incarnation(config)
+    try:
+        active = runtime.get_active(agent_name)
+    except AgentNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
     if not active:
         return {"status": "no_active", "agent": agent_name}
 
     try:
-        result = run_bardo(config, active)
+        result = runtime.trigger_bardo(agent_name, active)
         return {"status": result.get("status", "unknown"), "agent": agent_name, "incarnation": active}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Forced bardo failed: {e}")
@@ -482,12 +496,12 @@ def internal_bardo(agent_name: str, request: Optional[dict] = None) -> dict:
 
 @app.post("/internal/registry/reload")
 def internal_registry_reload() -> dict:
-    """Force the agent registry to reload (for Janitor tool use)."""
+    """Force the agent registry to reload."""
     registry._refresh()
     return {"status": "reloaded", "agents": registry.all_agents()}
 
 
-# ── Scheduler management endpoints ────────────────────────────────────────────
+# ── Scheduler management ───────────────────────────────────────────────────────
 
 @app.get("/scheduler/pending")
 def get_scheduler_pending(agent: Optional[str] = None) -> dict:
@@ -502,127 +516,6 @@ def get_scheduler_pending(agent: Optional[str] = None) -> dict:
         "pending": [i.to_dict() for i in items],
         "count": len(items),
     }
-
-
-# ── Admin endpoints ────────────────────────────────────────────────────────────
-
-class UndissolveRequest(BaseModel):
-    agent: str
-    incarnation: str
-
-
-class BudgetOverrideRequest(BaseModel):
-    agent: str
-    additional_tokens: int = 100_000
-
-
-@app.post("/admin/undissolve")
-def admin_undissolve(req: UndissolveRequest) -> dict:
-    """
-    Restore a dissolved incarnation from Akashic records.
-    Recreates the karma folder, transcript, and current symlink.
-    """
-    config = registry.get(req.agent)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found.")
-
-    akasha_path = config.akasha_dir / req.incarnation
-    if not akasha_path.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Incarnation '{req.incarnation}' not found in akasha.",
-        )
-
-    akasha_transcript = akasha_path / f"{req.incarnation}-transcript.jsonl"
-    if not akasha_transcript.exists():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Transcript not found in akasha for '{req.incarnation}'.",
-        )
-
-    # Check if an active incarnation already exists
-    active = get_active_incarnation(config)
-    if active:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Agent '{req.agent}' has active incarnation '{active}'. Bardo it first.",
-        )
-
-    try:
-        karma_path = config.karma_dir / req.incarnation
-        karma_path.mkdir(parents=True, exist_ok=True)
-
-        # Restore transcript
-        import shutil
-        transcript_path = karma_path / "transcript.jsonl"
-        shutil.copy2(akasha_transcript, transcript_path)
-
-        # Recreate scratch dir
-        (karma_path / "scratch").mkdir(exist_ok=True)
-
-        # Add undissolved marker to transcript
-        from .transcript import append_entry
-        from datetime import datetime, timezone
-        append_entry(transcript_path, {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            "type": "undissolved",
-            "incarnation": req.incarnation,
-            "note": "Incarnation restored by God-lite",
-        })
-
-        # Update current symlink
-        symlink = config.current_symlink
-        if symlink.is_symlink() or symlink.exists():
-            symlink.unlink()
-        symlink.symlink_to(karma_path)
-
-        return {
-            "status": "restored",
-            "agent": req.agent,
-            "incarnation": req.incarnation,
-            "karma_path": str(karma_path),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Undissolve failed: {e}")
-
-
-@app.post("/admin/budget-override")
-def admin_budget_override(req: BudgetOverrideRequest) -> dict:
-    """Grant additional token budget to a paused agent."""
-    from .budget import resume_budget, load_budget
-
-    config = registry.get(req.agent)
-    if not config:
-        raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found.")
-
-    before = load_budget(req.agent)
-    budget = resume_budget(req.agent, additional_tokens=req.additional_tokens)
-
-    return {
-        "status": "resumed",
-        "agent": req.agent,
-        "additional_tokens": req.additional_tokens,
-        "tokens_used_before": before.get("tokens_used", 0),
-        "tokens_used_after": budget.get("tokens_used", 0),
-        "weekly_budget": config.weekly_budget_tokens,
-        "budget_remaining": config.weekly_budget_tokens - budget.get("tokens_used", 0),
-    }
-
-
-@app.post("/admin/bardo-check")
-def admin_bardo_check() -> dict:
-    """Trigger bardo timeout check across all agents."""
-    from .bardo import check_bardo_timeouts
-    triggered = check_bardo_timeouts(registry)
-    return {"status": "checked", "triggered": triggered, "count": len(triggered)}
-
-
-@app.post("/admin/budget-reset")
-def admin_budget_reset() -> dict:
-    """Reset weekly budgets for all agents (Monday task)."""
-    from .budget import reset_weekly_budgets
-    reset = reset_weekly_budgets()
-    return {"status": "reset", "agents": reset}
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

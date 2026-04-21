@@ -151,6 +151,29 @@ def _set_permissions_safe(path: Path, mode: int) -> None:
         pass
 
 
+def _worth_consolidating(entries: list[dict[str, Any]]) -> bool:
+    """
+    Conservative check: only run Sonnet summarization if there's something real to consolidate.
+    Purely mechanical incarnations (heartbeats that did nothing) just get archived.
+    Skip archiving entirely if the transcript has no meaningful content at all.
+    """
+    meaningful_types = {"human_message", "memory_flag"}
+    tool_calls = [e for e in entries if e.get("type") == "tool_call"]
+    has_meaningful = any(e.get("type") in meaningful_types for e in entries)
+    # Also consolidate if agent did substantial tool work (>2 calls) even without human messages
+    has_real_work = len(tool_calls) > 2
+    return has_meaningful or has_real_work
+
+
+def _worth_archiving(entries: list[dict[str, Any]]) -> bool:
+    """
+    Even lighter check: is there anything beyond the incarnation_start marker?
+    Completely empty incarnations (precheck passed but agent did nothing) aren't worth keeping.
+    """
+    non_start = [e for e in entries if e.get("type") not in ("incarnation_start", "bardo_complete")]
+    return len(non_start) > 0
+
+
 def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any]:
     """
     Execute full bardo for a completed incarnation:
@@ -176,10 +199,32 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     entries = read_entries(transcript_path)
     cycle_count = sum(1 for e in entries if e.get("type") == "human_message")
 
+    if not _worth_archiving(entries):
+        # Completely empty — just clean up, nothing to keep
+        symlink = agent_config.current_symlink
+        if symlink.is_symlink():
+            symlink.unlink()
+        shutil.rmtree(incarnation_dir)
+        return {"status": "skipped", "reason": "empty incarnation", "incarnation": incarnation_name}
+
     # Write bardo_complete to transcript before archiving
     write_bardo_complete(transcript_path, incarnation_name, cycle_count)
-    # Re-read with the bardo_complete entry
     entries = read_entries(transcript_path)
+
+    consolidate = _worth_consolidating(entries)
+
+    if not consolidate:
+        # Archive to akasha but skip the Sonnet summarization
+        akasha_dir = agent_config.akasha_dir / incarnation_name
+        akasha_dir.mkdir(parents=True, exist_ok=True)
+        akasha_transcript = akasha_dir / f"{incarnation_name}-transcript.jsonl"
+        shutil.copy2(transcript_path, akasha_transcript)
+        _set_permissions_safe(akasha_transcript, 0o640)
+        symlink = agent_config.current_symlink
+        if symlink.is_symlink():
+            symlink.unlink()
+        shutil.rmtree(incarnation_dir)
+        return {"status": "archived", "reason": "not worth consolidating", "incarnation": incarnation_name}
 
     # 1. Summarize → episodic/extended
     summary_json = _summarize_transcript(

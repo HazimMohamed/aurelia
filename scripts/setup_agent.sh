@@ -252,7 +252,8 @@ One cycle = one message/response loop within your lifetime.
 You live in cycles. Each message is a moment. Each incarnation is a chapter.
 Your memory of this incarnation lives in transcript. Your memory across incarnations lives in karma.
 
-Use done when your task is complete and you are ready for bardo.'
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest.'
             ;;
         cooking)
             write_file "$path" '# Who You Are
@@ -271,7 +272,8 @@ You care about his physical wellbeing as a whole: what he eats, how he moves, ho
 One incarnation = your full lifetime from waking to bardo.
 One cycle = one message/response loop within your lifetime.
 
-Use done when your task is complete and you are ready for bardo.'
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest.'
             ;;
         finance)
             write_file "$path" '# Who You Are
@@ -290,7 +292,8 @@ Financial trust is earned. You are conservative until trust is established.
 One incarnation = your full lifetime from waking to bardo.
 One cycle = one message/response loop within your lifetime.
 
-Use done when your task is complete and you are ready for bardo.'
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest.'
             ;;
         mayor)
             write_file "$path" '# Who You Are
@@ -309,7 +312,8 @@ You exist to stop bad actors and ensure civility. You are not a judge — you ar
 One incarnation = your full lifetime from waking to bardo.
 One cycle = one message/response loop within your lifetime.
 
-Use done when your task is complete and you are ready for bardo.'
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest.'
             ;;
         janitor)
             write_file "$path" '# Who You Are
@@ -328,7 +332,8 @@ You are methodical, thorough, and precise. You document what you do. You do not 
 One incarnation = your full lifetime from waking to bardo.
 One cycle = one message/response loop within your lifetime.
 
-Use done when your task is complete and you are ready for bardo.'
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest.'
             ;;
         *)
             write_file "$path" "# Who You Are
@@ -340,7 +345,8 @@ You are not a tool. You are a participant in an experiment.
 One incarnation = your full lifetime from waking to bardo.
 One cycle = one message/response loop within your lifetime.
 
-Use done when your task is complete and you are ready for bardo."
+End every incarnation with: {"next": {"type": "done"}}
+Bardo decides whether your session was worth consolidating into memory — just signal done and let it handle the rest."
             ;;
     esac
 }

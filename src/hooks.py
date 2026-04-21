@@ -96,8 +96,7 @@ def heartbeat_precheck(agent: AgentConfig) -> bool:
 
     has_unread = count_bulletin_unread(agent) > 0
     has_scheduled = count_scheduled_now(agent) > 0
-    # Always allow heartbeat if there's budget (agents explore in free time)
-    has_budget = True
+    has_budget = get_budget_remaining(agent) > 1_000
     return has_unread or has_scheduled or has_budget
 
 
@@ -121,9 +120,7 @@ def format_heartbeat_prompt(agent: AgentConfig) -> str:
 
     parts += [
         "",
-        "When you are done, respond with the structured next action:",
-        '- To go back to sleep: {"next": {"type": "sleep"}}',
-        '- To trigger bardo: {"next": {"type": "done"}}',
+        'When you are done, end with: {"next": {"type": "done"}}',
     ]
     return "\n".join(parts)
 
@@ -141,9 +138,7 @@ def format_task_goal(payload: dict[str, Any]) -> str:
         "",
         f"**Task type:** {task_type}",
         "",
-        "Complete your task, then respond with the structured next action:",
-        '- To finish and sleep: {"next": {"type": "sleep"}}',
-        '- To trigger bardo: {"next": {"type": "done"}}',
+        'When you are done, end with: {"next": {"type": "done"}}',
     ]
     return "\n".join(parts)
 
