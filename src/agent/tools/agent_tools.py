@@ -268,7 +268,7 @@ def handle_registry_reload(input_data: dict[str, Any], **ctx: Any) -> dict[str, 
 
 def handle_config_update(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     """Update config.json at a dot-separated path. Janitor-only. Logged."""
-    from ..config import GLOBAL_CONFIG_PATH
+    from ...samsara.config import GLOBAL_CONFIG_PATH
 
     agent_config = ctx.get("agent_config")
     incarnation_state = ctx.get("incarnation_state")

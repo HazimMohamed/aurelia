@@ -7,19 +7,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import AgentConfig
-from .hooks import HookType
+from ..agent.hooks import HookType
 from .registry import AgentRegistry
-from .incarnation import (
+from ..agent.incarnation import (
     get_active_incarnation,
     get_or_spawn_incarnation,
     spawn_incarnation,
     load_incarnation,
     get_incarnation_by_id,
 )
-from .core import run_agent_cycle_and_parse
-from .bardo import run_bardo
+from ..agent.core import run_agent_cycle_and_parse
+from ..memory.bardo import run_bardo
 from .scheduler import count_pending_for_agent
-from .transcript import read_entries
+from ..agent.transcript import read_entries
 
 
 # ── Runtime errors ─────────────────────────────────────────────────────────────
@@ -154,7 +154,7 @@ def dispatch(
     sender = payload.get("sender", "god-lite")
     human_content = content
 
-    from .tools.registry import build_tool_registry
+    from ..agent.tools.registry import build_tool_registry
 
     tool_registry = build_tool_registry(
         hook_type=hook,
@@ -278,7 +278,7 @@ def list_incarnations(agent: str) -> list[IncarnationSummary]:
 
 def list_agents() -> list[AgentSummary]:
     """List all registered agents and their current status."""
-    from .budget import get_budget_remaining, load_budget
+    from ..memory.budget import get_budget_remaining, load_budget
 
     summaries = []
     for agent_name in _registry.all_agents():
@@ -370,7 +370,7 @@ def run_hook(
     """
     config = _require_config(agent)
 
-    from .tools.registry import build_tool_registry
+    from ..agent.tools.registry import build_tool_registry
 
     tool_registry = build_tool_registry(
         hook_type=hook_type,
@@ -410,7 +410,7 @@ def process_scheduled_item(item: dict) -> dict:
     Process a scheduled item directly — called by the scheduler thread inside the runtime daemon.
     Routes to the correct hook handler based on item type.
     """
-    from .hooks import HookType
+    from ..agent.hooks import HookType
     agent = item.get("agent")
     item_type = item.get("type", "scheduled_task")
     payload = item.get("payload") or {}
@@ -418,13 +418,13 @@ def process_scheduled_item(item: dict) -> dict:
     payload["rebirth_from"] = item.get("rebirth_from")
 
     if item_type == "bardo_check":
-        from .bardo import check_bardo_timeouts
+        from ..memory.bardo import check_bardo_timeouts
         _registry = get_registry()
         triggered = check_bardo_timeouts(_registry)
         return {"status": "ok", "triggered": triggered}
 
     if item_type == "budget_reset":
-        from .budget import reset_all_budgets
+        from ..memory.budget import reset_all_budgets
         reset_all_budgets()
         return {"status": "ok", "action": "budget_reset"}
 
@@ -436,7 +436,7 @@ def process_scheduled_item(item: dict) -> dict:
         hook = HookType.SCHEDULED_TASK
 
     config = _require_config(agent)
-    from .hooks import heartbeat_precheck
+    from ..agent.hooks import heartbeat_precheck
     if hook == HookType.HEARTBEAT and not heartbeat_precheck(config):
         return {"status": "skipped", "reason": "precheck_false", "agent": agent}
 
@@ -465,8 +465,8 @@ def build_hook_prompt(
     Build the full hook prompt string for an autonomous hook.
     Used by /internal/process so main.py doesn't import from context directly.
     """
-    from .context import load_recent_episodic_summary, load_episodic_extended
-    from .hooks import (
+    from ..agent.context import load_recent_episodic_summary, load_episodic_extended
+    from ..agent.hooks import (
         format_heartbeat_prompt,
         format_task_goal,
         format_agent_invite,
@@ -502,7 +502,7 @@ def build_hook_prompt(
 
 def get_budget_info(agent: str) -> dict:
     """Return raw budget dict for an agent (status, tokens_used, etc.)."""
-    from .budget import load_budget
+    from ..memory.budget import load_budget
     return load_budget(agent)
 
 

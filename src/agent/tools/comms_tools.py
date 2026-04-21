@@ -64,7 +64,7 @@ def handle_invite_agent(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     import json
     import httpx
     from pathlib import Path
-    from ..config import AGENT_HOME_BASE
+    from ...samsara.config import AGENT_HOME_BASE
 
     target_agent = input_data.get("agent", "")
     task = input_data.get("task", "")
@@ -206,7 +206,7 @@ def register_comms_tools(
 def _load_agent_token(agent_name: str) -> str:
     """Load the agent's bearer token for API auth."""
     import json
-    from ..config import GLOBAL_CONFIG_PATH
+    from ...samsara.config import GLOBAL_CONFIG_PATH
 
     try:
         if GLOBAL_CONFIG_PATH.exists():

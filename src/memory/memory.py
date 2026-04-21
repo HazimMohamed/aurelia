@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .config import AgentConfig
+from ..samsara.config import AgentConfig
 
 SHARED_HAZIM_PATH = Path("/var/aurelia/shared/hazim.jsonl")
 SHARED_INTRO_PATH = Path("/var/aurelia/shared/hazim_introduction.md")

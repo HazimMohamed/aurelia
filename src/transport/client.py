@@ -12,14 +12,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .runtime import (
+from ..samsara.runtime_core import (
     AgentResponse,
     AgentSummary,
     HealthReport,
     IncarnationSummary,
     TranscriptEntry,
 )
-from .hooks import HookType
+from ..agent.hooks import HookType
 
 SOCKET_PATH = Path("/var/aurelia/runtime.sock")
 

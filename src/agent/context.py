@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .config import AgentConfig
+from ..samsara.config import AgentConfig
 from .transcript import transcript_to_messages
 
 
@@ -26,7 +26,7 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     constitution + identity + semantic core + episodic core +
     hazim introduction + shared hazim context + room mention.
     """
-    from .memory import (
+    from ..memory.memory import (
         load_semantic_core,
         load_episodic_core,
         load_hazim_introduction,
@@ -99,7 +99,7 @@ def build_hook_messages(
 ) -> list[dict[str, Any]]:
     """Build messages array appropriate for the given hook type."""
     from .hooks import HookType
-    from .memory import load_episodic_extended_relevant, load_semantic_extended_relevant
+    from ..memory.memory import load_episodic_extended_relevant, load_semantic_extended_relevant
 
     if hook_type == HookType.HUMAN_MESSAGE:
         # Standard conversation: history + relevant extended memory + new message

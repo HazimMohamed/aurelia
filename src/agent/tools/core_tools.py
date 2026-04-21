@@ -218,7 +218,7 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     # Immediate write to semantic core if tier=semantic_core (Path 1)
     if tier == "semantic_core" and agent_config:
         try:
-            from ..memory import write_semantic_core
+            from ...memory.memory import write_semantic_core
             write_semantic_core(agent_config, entry)
             return {
                 "status": "written",
@@ -237,7 +237,7 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     # For semantic extended — also write immediately
     if tier == "semantic" and agent_config:
         try:
-            from ..memory import write_semantic_extended
+            from ...memory.memory import write_semantic_extended
             write_semantic_extended(agent_config, category, entry)
             return {
                 "status": "written",
@@ -401,7 +401,7 @@ def handle_shared_context_write(input_data: dict[str, Any], **ctx: Any) -> dict[
     author = agent_config.name if agent_config else "unknown"
 
     try:
-        from ..memory import write_shared_context
+        from ...memory.memory import write_shared_context
         entry = write_shared_context(
             author=author,
             entry_type=entry_type,
@@ -432,7 +432,7 @@ def handle_search_episodic(input_data: dict[str, Any], **ctx: Any) -> dict[str, 
         return {"error": "no agent_config in context"}
 
     try:
-        from ..memory import search_episodic
+        from ...memory.memory import search_episodic
         results = search_episodic(agent_config, query, limit=limit)
 
         formatted = []
@@ -497,7 +497,7 @@ def register_core_tools(
 def _load_agent_token(agent_name: str) -> str:
     """Load the agent's bearer token for API auth."""
     import json
-    from ..config import GLOBAL_CONFIG_PATH
+    from ...samsara.config import GLOBAL_CONFIG_PATH
 
     try:
         if GLOBAL_CONFIG_PATH.exists():

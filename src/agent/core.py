@@ -8,7 +8,7 @@ from typing import Any
 
 import anthropic
 
-from .config import AgentConfig
+from ..samsara.config import AgentConfig
 from .context import build_system_prompt, build_messages, build_hook_messages
 from .transcript import (
     write_human_message,
@@ -107,7 +107,7 @@ def run_agent_cycle(
     # Track token budget after cycle completes
     if total_tokens > 0:
         try:
-            from .budget import check_and_apply_budget
+            from ..memory.budget import check_and_apply_budget
             check_and_apply_budget(
                 config=config,
                 tokens_used=total_tokens,

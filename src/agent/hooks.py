@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .config import AgentConfig
+from ..samsara.config import AgentConfig
 
 
 class HookType(str, Enum):
@@ -85,7 +85,7 @@ def heartbeat_precheck(agent: AgentConfig) -> bool:
     """
     # Budget check — skip heartbeat if paused or below minimum threshold
     try:
-        from .budget import get_budget_remaining, is_budget_ok
+        from ..memory.budget import get_budget_remaining, is_budget_ok
         if not is_budget_ok(agent):
             return False
         remaining = get_budget_remaining(agent)

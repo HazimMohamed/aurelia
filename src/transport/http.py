@@ -17,10 +17,10 @@ if _env_path.exists():
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
-from .runtime_client import client as runtime
-from .hooks import HookType
-from .config import AgentConfig, GLOBAL_CONFIG_PATH
-from .scheduler import (
+from .client import client as runtime
+from ..agent.hooks import HookType
+from ..samsara.config import AgentConfig, GLOBAL_CONFIG_PATH
+from ..samsara.scheduler import (
     ScheduledItem,
     ALLOWED_TYPES,
     JANITOR_ONLY_TYPES,
@@ -45,7 +45,7 @@ def _get_agent_config(agent_name: str) -> Optional[AgentConfig]:
     """Load an AgentConfig from the registry via the daemon."""
     # We use the config module directly for auth — it's read-only filesystem access
     # and doesn't need to go through the daemon.
-    from .config import load_agent_config
+    from ..samsara.config import load_agent_config
     try:
         from pathlib import Path as _Path
         agent_json = _Path("/home") / agent_name / "agent.json"
@@ -514,7 +514,7 @@ def internal_registry_reload() -> dict:
 @app.get("/scheduler/pending")
 def get_scheduler_pending(agent: Optional[str] = None) -> dict:
     """List pending scheduled items, optionally filtered by agent."""
-    from .scheduler import load_pending_items
+    from ..samsara.scheduler import load_pending_items
 
     items = load_pending_items()
     if agent:

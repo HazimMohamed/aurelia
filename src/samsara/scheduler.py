@@ -277,8 +277,8 @@ class SchedulerDaemon:
                 self._fire_item(item, now)
 
     def _fire_item(self, item: ScheduledItem, now: datetime) -> None:
-        """Fire a scheduled item by calling runtime directly — no HTTP hop needed."""
-        from . import runtime as _runtime
+        """Fire a scheduled item by calling runtime_core directly — no HTTP hop needed."""
+        from . import runtime_core as _runtime
         try:
             _runtime.process_scheduled_item(item.to_dict())
             print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})")

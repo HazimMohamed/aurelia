@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from .config import AgentConfig
+from ..samsara.config import AgentConfig
 
 BUDGET_DIR = Path("/var/aurelia/budgets")
 DASHBOARD_QUEUE_DIR = Path("/var/aurelia/dashboard/queue")
@@ -135,6 +135,10 @@ def reset_weekly_budgets() -> list[str]:
         save_budget(agent_name, budget)
         reset.append(agent_name)
     return reset
+
+
+# Keep old name as alias for any callers that used reset_all_budgets
+reset_all_budgets = reset_weekly_budgets
 
 
 def _write_budget_exhausted_notification(

@@ -29,8 +29,8 @@ from typing import Any
 # Ensure the package root is importable when run as -m src.runtime_daemon
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from . import runtime
-from .hooks import HookType
+from . import runtime_core as runtime
+from ..agent.hooks import HookType
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -141,7 +141,7 @@ def _dispatch(request: dict[str, Any]) -> Any:
 
 def _dispatch_internal_process(request: dict[str, Any]) -> dict[str, Any]:
     """Handle autonomous hook processing (heartbeat, scheduled_task, agent_invite)."""
-    from .hooks import heartbeat_precheck
+    from ..agent.hooks import heartbeat_precheck
 
     agent_name = request["agent"]
     hook_type = request["hook_type"]
