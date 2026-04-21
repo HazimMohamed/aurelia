@@ -52,6 +52,31 @@ write_file() {
     fi
 }
 
+setup_groups_and_users() {
+    log "Setting up groups and user memberships..."
+
+    # Create transport_group if it doesn't exist.
+    # Members of this group can connect to /var/aurelia/runtime.sock (660).
+    groupadd -f transport_group
+    log "  transport_group ensured"
+
+    # aurelia user is the runtime daemon process owner
+    if id aurelia &>/dev/null; then
+        usermod -aG transport_group aurelia
+        log "  aurelia added to transport_group"
+    else
+        log "  WARNING: user 'aurelia' does not exist, skipping"
+    fi
+
+    # zuzu is the dev user — HTTP server runs as zuzu in development
+    if id zuzu &>/dev/null; then
+        usermod -aG transport_group zuzu
+        log "  zuzu added to transport_group"
+    else
+        log "  NOTE: user 'zuzu' not found, skipping (not needed in production)"
+    fi
+}
+
 setup_var_aurelia() {
     log "Setting up /var/aurelia..."
     mkdir -p /var/aurelia
@@ -400,6 +425,7 @@ main() {
         done
     else
         # Setup everything
+        setup_groups_and_users
         setup_var_aurelia
         for agent in "${DEFAULT_AGENTS[@]}"; do
             setup_agent "$agent"

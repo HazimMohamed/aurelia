@@ -1,4 +1,4 @@
-"""Aurelia HTTP transport — thin wrapper over src/runtime.py."""
+"""Aurelia HTTP transport — thin client over the runtime daemon."""
 
 from __future__ import annotations
 
@@ -17,21 +17,9 @@ if _env_path.exists():
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
-from . import runtime
-from .runtime import (
-    AgentNotFound,
-    IncarnationAlreadyActive,
-    IncarnationNotActive,
-    IncarnationNotFound,
-)
+from .runtime_client import client as runtime
+from .hooks import HookType
 from .config import AgentConfig, GLOBAL_CONFIG_PATH
-from .hooks import (
-    HookType,
-    heartbeat_precheck,
-    format_heartbeat_prompt,
-    format_task_goal,
-    format_agent_invite,
-)
 from .scheduler import (
     ScheduledItem,
     ALLOWED_TYPES,
@@ -43,9 +31,6 @@ from .scheduler import (
 
 app = FastAPI(title="Aurelia", version="0.4.0")
 
-# Registry exposed from runtime module (single instance)
-registry = runtime.get_registry()
-
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
 
@@ -56,9 +41,19 @@ def _load_global_config() -> dict:
     return {}
 
 
-def _get_agent_token(agent_name: str) -> Optional[str]:
-    cfg = _load_global_config()
-    return cfg.get("agents", {}).get(agent_name, {}).get("token")
+def _get_agent_config(agent_name: str) -> Optional[AgentConfig]:
+    """Load an AgentConfig from the registry via the daemon."""
+    # We use the config module directly for auth — it's read-only filesystem access
+    # and doesn't need to go through the daemon.
+    from .config import load_agent_config
+    try:
+        from pathlib import Path as _Path
+        agent_json = _Path("/home") / agent_name / "agent.json"
+        if not agent_json.exists():
+            return None
+        return load_agent_config(agent_name)
+    except Exception:
+        return None
 
 
 def _load_janitor_token() -> Optional[str]:
@@ -84,8 +79,33 @@ def _authenticate_agent(
     agents_cfg = cfg.get("agents", {})
     for agent_name, agent_data in agents_cfg.items():
         if isinstance(agent_data, dict) and agent_data.get("token") == token:
-            return registry.get(agent_name)
+            return _get_agent_config(agent_name)
     return None
+
+
+def _require_agent(agent_name: str) -> AgentConfig:
+    """Raise 404 if agent is not registered."""
+    config = _get_agent_config(agent_name)
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agent_name}' not found. Run scripts/setup_agent.sh to create it.",
+        )
+    return config
+
+
+def _runtime_error_to_http(e: RuntimeError) -> HTTPException:
+    """Convert a RuntimeError from the client into an appropriate HTTP error."""
+    msg = str(e)
+    if "AgentNotFound" in msg:
+        return HTTPException(status_code=404, detail=msg)
+    if "IncarnationNotFound" in msg:
+        return HTTPException(status_code=404, detail=msg)
+    if "IncarnationAlreadyActive" in msg:
+        return HTTPException(status_code=409, detail=msg)
+    if "IncarnationNotActive" in msg:
+        return HTTPException(status_code=409, detail=msg)
+    return HTTPException(status_code=500, detail=msg)
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -163,62 +183,57 @@ def post_message(req: MessageRequest) -> MessageResponse:
     if not agent_name:
         raise HTTPException(status_code=400, detail="'to.agent' is required")
 
-    # Validate agent exists
-    config = registry.get(agent_name)
-    if not config:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Agent '{agent_name}' not found. Run scripts/setup_agent.sh to create it.",
-        )
-
-    # Transport-level policy: find active incarnation or spawn one
-    if req.to.incarnation_id:
-        # Explicit incarnation requested — validate it exists
-        try:
-            incarnations = runtime.list_incarnations(agent_name)
-        except AgentNotFound as e:
-            raise HTTPException(status_code=404, detail=str(e))
-
-        target = next(
-            (i for i in incarnations if i.name == req.to.incarnation_id),
-            None,
-        )
-        if not target:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Incarnation '{req.to.incarnation_id}' not found for agent '{agent_name}'",
-            )
-        if target.status != "active":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Incarnation '{req.to.incarnation_id}' is not active (status: {target.status})",
-            )
-        active_inc = target
-    else:
-        # Find active or spawn
-        incarnations = runtime.list_incarnations(agent_name)
-        active_inc = next((i for i in incarnations if i.status == "active"), None)
-        if not active_inc:
-            try:
-                active_inc = runtime.spawn(agent_name)
-            except IncarnationAlreadyActive as e:
-                # Race condition: someone spawned between list and spawn — re-query
-                incarnations = runtime.list_incarnations(agent_name)
-                active_inc = next((i for i in incarnations if i.status == "active"), None)
-                if not active_inc:
-                    raise HTTPException(status_code=500, detail=str(e))
-
-    sender = req.from_ or "god-lite"
+    _require_agent(agent_name)
 
     try:
+        if req.to.incarnation_id:
+            # Explicit incarnation requested — validate it exists and is active
+            incarnations = runtime.list_incarnations(agent_name)
+            target = next(
+                (i for i in incarnations if i.name == req.to.incarnation_id),
+                None,
+            )
+            if not target:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Incarnation '{req.to.incarnation_id}' not found for agent '{agent_name}'",
+                )
+            if target.status != "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Incarnation '{req.to.incarnation_id}' is not active (status: {target.status})",
+                )
+            active_inc = target
+        else:
+            # Find active or spawn
+            incarnations = runtime.list_incarnations(agent_name)
+            active_inc = next((i for i in incarnations if i.status == "active"), None)
+            if not active_inc:
+                try:
+                    active_inc = runtime.spawn(agent_name)
+                except RuntimeError as e:
+                    if "IncarnationAlreadyActive" in str(e):
+                        # Race condition: someone spawned between list and spawn — re-query
+                        incarnations = runtime.list_incarnations(agent_name)
+                        active_inc = next((i for i in incarnations if i.status == "active"), None)
+                        if not active_inc:
+                            raise HTTPException(status_code=500, detail=str(e))
+                    else:
+                        raise _runtime_error_to_http(e)
+
+        sender = req.from_ or "god-lite"
         response = runtime.dispatch(
             agent=agent_name,
             incarnation=active_inc.name,
             hook=HookType.HUMAN_MESSAGE,
             payload={"content": req.content, "sender": sender},
         )
-    except (IncarnationNotFound, IncarnationNotActive) as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Agent cycle failed: {e}")
 
@@ -233,7 +248,10 @@ def post_message(req: MessageRequest) -> MessageResponse:
 @app.get("/health")
 def get_health() -> dict:
     """Return health status for all known agents."""
-    report = runtime.get_health()
+    try:
+        report = runtime.get_health()
+    except (RuntimeError, ConnectionError) as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     agents_out = {}
     for summary in report.agents:
@@ -250,10 +268,13 @@ def get_health() -> dict:
             entry["weekly_budget"] = summary.weekly_budget
         entry["scheduler_queue"] = summary.scheduler_queue
 
-        if registry.get(summary.name):
-            budget_info = runtime.get_budget_info(summary.name)
-            entry["budget_status"] = budget_info.get("status", "active")
-            entry["tokens_used_this_week"] = budget_info.get("tokens_used", 0)
+        if _get_agent_config(summary.name):
+            try:
+                budget_info = runtime.get_budget_info(summary.name)
+                entry["budget_status"] = budget_info.get("status", "active")
+                entry["tokens_used_this_week"] = budget_info.get("tokens_used", 0)
+            except (RuntimeError, ConnectionError):
+                pass
 
         agents_out[summary.name] = entry
 
@@ -269,10 +290,10 @@ def get_history(agent_name: str, incarnation_id: str) -> dict:
     """Return transcript for a specific incarnation."""
     try:
         entries = runtime.get_history(agent_name, incarnation_id)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except IncarnationNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "agent": agent_name,
@@ -295,8 +316,10 @@ def list_agent_incarnations(agent_name: str) -> dict:
     """List all incarnations for an agent."""
     try:
         incarnations = runtime.list_incarnations(agent_name)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     return {
         "agent": agent_name,
@@ -315,7 +338,11 @@ def list_agent_incarnations(agent_name: str) -> dict:
 @app.get("/agents")
 def list_agents() -> dict:
     """List all registered agents and their status."""
-    agents = runtime.list_agents()
+    try:
+        agents = runtime.list_agents()
+    except (RuntimeError, ConnectionError) as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
     return {
         "agents": [
             {
@@ -338,13 +365,14 @@ def list_agents() -> dict:
 @app.post("/bardo/{agent_name}", response_model=BardoResponse)
 def post_bardo(agent_name: str) -> BardoResponse:
     """Manually trigger bardo for an agent's active incarnation."""
-    if not registry.get(agent_name):
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
+    _require_agent(agent_name)
 
     try:
         active = runtime.get_active(agent_name)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     if not active:
         raise HTTPException(
@@ -353,8 +381,8 @@ def post_bardo(agent_name: str) -> BardoResponse:
         )
 
     try:
-        result = runtime.trigger_bardo(agent_name, active)
-    except Exception as e:
+        result = runtime.trigger_bardo(agent_name)
+    except (RuntimeError, ConnectionError) as e:
         raise HTTPException(status_code=500, detail=f"Bardo failed: {e}")
 
     return BardoResponse(
@@ -373,49 +401,25 @@ def post_bardo(agent_name: str) -> BardoResponse:
 def internal_process(req: ProcessRequest) -> dict:
     """Process a scheduled work item (called by scheduler daemon or agent daemon)."""
     agent_name = req.agent
-    config = registry.get(agent_name)
-    if not config:
+    if not _get_agent_config(agent_name):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
 
-    hook_type = req.type
-    payload = req.payload or {}
-
-    # Heartbeat pre-check
-    if hook_type == HookType.HEARTBEAT:
-        if not heartbeat_precheck(config):
-            return {"status": "skipped", "reason": "heartbeat_precheck_false", "agent": agent_name}
-
-    # Build hook prompt via runtime (keeps context/hooks imports out of main)
-    hook_prompt = runtime.build_hook_prompt(
-        agent=agent_name,
-        hook_type=hook_type,
-        goal=req.goal or "",
-        payload=payload,
-        rebirth_from=req.rebirth_from,
-    )
-
-    # Spawn fresh incarnation for autonomous hooks
-    incarnation_state = runtime.spawn_fresh_for_hook(agent_name, hook_type)
-
     try:
-        response_text, next_action = runtime.run_hook(
+        result = runtime.internal_process(
             agent=agent_name,
-            hook_type=hook_type,
-            hook_prompt=hook_prompt,
-            incarnation_state=incarnation_state,
+            hook_type=req.type,
+            goal=req.goal or "",
+            payload=req.payload or {},
+            rebirth_from=req.rebirth_from,
         )
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Hook cycle failed: {e}")
 
-    action_type = next_action.get("type", "sleep")
-
-    return {
-        "status": "ok",
-        "agent": agent_name,
-        "incarnation": incarnation_state["name"],
-        "hook": hook_type,
-        "next_action": action_type,
-    }
+    return result
 
 
 @app.post("/internal/schedule")
@@ -447,7 +451,7 @@ def internal_schedule(
                 detail="Agents can only schedule tasks for themselves",
             )
 
-    target_config = registry.get(req.agent)
+    target_config = _get_agent_config(req.agent)
     if not target_config:
         raise HTTPException(status_code=404, detail=f"Agent '{req.agent}' not found")
 
@@ -476,29 +480,33 @@ def internal_schedule(
 @app.post("/internal/bardo/{agent_name}")
 def internal_bardo(agent_name: str, request: Optional[dict] = None) -> dict:
     """Internal bardo trigger. Non-fatal if no active incarnation exists."""
-    if not registry.get(agent_name):
+    if not _get_agent_config(agent_name):
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
 
     try:
         active = runtime.get_active(agent_name)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise _runtime_error_to_http(e)
+    except ConnectionError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
     if not active:
         return {"status": "no_active", "agent": agent_name}
 
     try:
-        result = runtime.trigger_bardo(agent_name, active)
+        result = runtime.trigger_bardo(agent_name)
         return {"status": result.get("status", "unknown"), "agent": agent_name, "incarnation": active}
-    except Exception as e:
+    except (RuntimeError, ConnectionError) as e:
         raise HTTPException(status_code=500, detail=f"Forced bardo failed: {e}")
 
 
 @app.post("/internal/registry/reload")
 def internal_registry_reload() -> dict:
-    """Force the agent registry to reload."""
-    registry._refresh()
-    return {"status": "reloaded", "agents": registry.all_agents()}
+    """Force the agent registry to reload in the runtime daemon."""
+    try:
+        return runtime.registry_reload()
+    except (RuntimeError, ConnectionError) as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ── Scheduler management ───────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 [Unit]
 Description=Aurelia FastAPI Server
-After=network.target
+After=network.target aurelia-runtime.service
+Requires=aurelia-runtime.service
 
 [Service]
 User=zuzu

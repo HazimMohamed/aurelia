@@ -1,0 +1,14 @@
+[Unit]
+Description=Aurelia Runtime Daemon
+After=network.target
+
+[Service]
+User=aurelia
+Group=aurelia
+WorkingDirectory=/home/zuzu/Code/aurelia
+ExecStart=/home/zuzu/Code/aurelia/scripts/run_runtime.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

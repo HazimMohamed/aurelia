@@ -52,6 +52,23 @@ start_daemon() {
     echo "[run_daemons] ${name} started (PID ${pid}). Log: ${log}"
 }
 
+# ── Runtime daemon (must be up before HTTP and agent daemons) ──────────────────
+
+start_daemon "runtime" "bash '${SCRIPT_DIR}/run_runtime.sh'"
+
+# Wait briefly for the socket to appear before starting dependents
+echo "[run_daemons] Waiting for runtime socket..."
+for i in $(seq 1 15); do
+    if [[ -S /var/aurelia/runtime.sock ]]; then
+        echo "[run_daemons] Runtime socket ready."
+        break
+    fi
+    sleep 1
+done
+if [[ ! -S /var/aurelia/runtime.sock ]]; then
+    echo "[run_daemons] WARNING: runtime socket not found after 15s — continuing anyway"
+fi
+
 # ── Scheduler ──────────────────────────────────────────────────────────────────
 
 start_daemon "scheduler" "bash '${SCRIPT_DIR}/scheduler_daemon.sh' '${API_URL}'"
