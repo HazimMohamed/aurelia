@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tools.registry import ToolRegistry
+from .registry import ToolRegistry
 
 
 WEB_SEARCH_SCHEMA = {

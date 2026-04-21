@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from tools.registry import ToolRegistry
+from .registry import ToolRegistry
 
 
 INVITE_AGENT_SCHEMA = {
@@ -64,7 +64,7 @@ def handle_invite_agent(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     import json
     import httpx
     from pathlib import Path
-    from config import AGENT_HOME_BASE
+    from ..config import AGENT_HOME_BASE
 
     target_agent = input_data.get("agent", "")
     task = input_data.get("task", "")
@@ -163,7 +163,7 @@ def handle_answer_phone(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
     # Log the response to transcript
     if incarnation_state:
-        from transcript import append_entry
+        from ..transcript import append_entry
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "type": "invitation_response",
@@ -206,7 +206,7 @@ def register_comms_tools(
 def _load_agent_token(agent_name: str) -> str:
     """Load the agent's bearer token for API auth."""
     import json
-    from config import GLOBAL_CONFIG_PATH
+    from ..config import GLOBAL_CONFIG_PATH
 
     try:
         if GLOBAL_CONFIG_PATH.exists():

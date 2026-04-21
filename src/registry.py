@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from config import AgentConfig, load_agent_config, list_known_agents
-from incarnation import get_active_incarnation
-from transcript import read_entries
+from .config import AgentConfig, load_agent_config, list_known_agents
+from .incarnation import get_active_incarnation
+from .transcript import read_entries
 
 
 class AgentRegistry:

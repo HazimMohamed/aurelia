@@ -19,19 +19,19 @@ if _env_path.exists():
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, model_validator
 
-from registry import AgentRegistry
-from incarnation import get_or_spawn_incarnation, get_incarnation_by_id, spawn_incarnation
-from core import run_agent_cycle, run_agent_cycle_and_parse
-from bardo import run_bardo
-from config import AgentConfig, GLOBAL_CONFIG_PATH
-from hooks import (
+from .registry import AgentRegistry
+from .incarnation import get_or_spawn_incarnation, get_incarnation_by_id, spawn_incarnation
+from .core import run_agent_cycle, run_agent_cycle_and_parse
+from .bardo import run_bardo
+from .config import AgentConfig, GLOBAL_CONFIG_PATH
+from .hooks import (
     HookType,
     heartbeat_precheck,
     format_heartbeat_prompt,
     format_task_goal,
     format_agent_invite,
 )
-from scheduler import (
+from .scheduler import (
     ScheduledItem,
     ALLOWED_TYPES,
     JANITOR_ONLY_TYPES,
@@ -39,8 +39,8 @@ from scheduler import (
     count_pending_for_agent,
     _parse_when,
 )
-from context import load_recent_episodic_summary, load_episodic_extended
-from incarnation import get_active_incarnation
+from .context import load_recent_episodic_summary, load_episodic_extended
+from .incarnation import get_active_incarnation
 
 app = FastAPI(title="Aurelia", version="0.2.0")
 
@@ -182,7 +182,7 @@ def post_message(req: MessageRequest) -> MessageResponse:
 
     sender = req.from_ or "god-lite"
 
-    from tools.registry import build_tool_registry
+    from .tools.registry import build_tool_registry
     tool_registry = build_tool_registry(
         hook_type=HookType.HUMAN_MESSAGE,
         agent_name=agent_name,
@@ -318,7 +318,7 @@ def internal_process(req: ProcessRequest) -> dict:
     # For autonomous hooks, spawn a fresh incarnation
     incarnation_state = spawn_incarnation_for_hook(config, hook_type)
 
-    from tools.registry import build_tool_registry
+    from .tools.registry import build_tool_registry
     tool_registry = build_tool_registry(
         hook_type=hook_type,
         agent_name=agent_name,
@@ -367,14 +367,14 @@ def spawn_incarnation_for_hook(config: AgentConfig, hook_type: str) -> dict:
     else:
         # Force a fresh incarnation for each autonomous wakeup
         # First, clean up any existing active incarnation (but don't bardo it here)
-        from incarnation import get_active_incarnation as _get_active
+        from .incarnation import get_active_incarnation as _get_active
         active = _get_active(config)
         if active:
             # Remove current symlink so spawn creates fresh
             if config.current_symlink.is_symlink():
                 config.current_symlink.unlink()
         incarnation_name = spawn_incarnation(config)
-        from incarnation import load_incarnation
+        from .incarnation import load_incarnation
         return load_incarnation(config, incarnation_name)
 
 
@@ -475,7 +475,7 @@ def internal_registry_reload() -> dict:
 @app.get("/scheduler/pending")
 def get_scheduler_pending(agent: Optional[str] = None) -> dict:
     """List pending scheduled items, optionally filtered by agent."""
-    from scheduler import load_pending_items
+    from .scheduler import load_pending_items
 
     items = load_pending_items()
     if agent:

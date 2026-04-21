@@ -8,15 +8,15 @@ from typing import Any
 
 import anthropic
 
-from config import AgentConfig
-from context import build_system_prompt, build_messages, build_hook_messages
-from transcript import (
+from .config import AgentConfig
+from .context import build_system_prompt, build_messages, build_hook_messages
+from .transcript import (
     write_human_message,
     write_assistant_message,
     write_tool_call,
     write_tool_result,
 )
-from hooks import HookType
+from .hooks import HookType
 
 MAX_TOOL_CYCLES = 20  # safety limit to prevent infinite loops
 

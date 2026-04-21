@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from config import AgentConfig
-from transcript import transcript_to_messages
+from .config import AgentConfig
+from .transcript import transcript_to_messages
 
 
 def _read_file_safe(path: Path) -> str:
@@ -52,7 +52,7 @@ def build_hook_messages(
     hook_type: str,
 ) -> list[dict[str, Any]]:
     """Build messages array appropriate for the given hook type."""
-    from hooks import HookType
+    from .hooks import HookType
 
     if hook_type == HookType.HUMAN_MESSAGE:
         # Standard conversation: history + new message

@@ -10,8 +10,8 @@ from typing import Any
 
 import anthropic
 
-from config import AgentConfig
-from transcript import (
+from .config import AgentConfig
+from .transcript import (
     read_entries,
     append_entry,
     write_bardo_complete,

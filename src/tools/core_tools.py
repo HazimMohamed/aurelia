@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from tools.registry import ToolRegistry
+from .registry import ToolRegistry
 
 
 # ── Tool schemas ───────────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
     # Write memory flag to transcript
     if incarnation_state:
-        from transcript import append_entry
+        from ..transcript import append_entry
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "type": "memory_flag",
@@ -206,7 +206,7 @@ def handle_schedule_task(input_data: dict[str, Any], **ctx: Any) -> dict[str, An
 def handle_log_note(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     """Write an explicit note to the transcript."""
     from datetime import datetime, timezone
-    from transcript import append_entry
+    from ..transcript import append_entry
 
     incarnation_state = ctx.get("incarnation_state")
     note = input_data.get("note", "")
@@ -275,7 +275,7 @@ def register_core_tools(
 def _load_agent_token(agent_name: str) -> str:
     """Load the agent's bearer token for API auth."""
     import json
-    from config import GLOBAL_CONFIG_PATH
+    from ..config import GLOBAL_CONFIG_PATH
 
     try:
         if GLOBAL_CONFIG_PATH.exists():

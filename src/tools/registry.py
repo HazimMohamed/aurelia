@@ -47,10 +47,10 @@ def build_tool_registry(
     api_url: str = "http://localhost:8000",
 ) -> ToolRegistry:
     """Build and return the tool registry for a given incarnation context."""
-    from tools.core_tools import register_core_tools
-    from tools.web_tools import register_web_tools
-    from tools.comms_tools import register_comms_tools
-    from tools.agent_tools import register_agent_tools
+    from .core_tools import register_core_tools
+    from .web_tools import register_web_tools
+    from .comms_tools import register_comms_tools
+    from .agent_tools import register_agent_tools
 
     registry = ToolRegistry()
 

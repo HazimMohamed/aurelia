@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from config import AgentConfig
+from .config import AgentConfig
 
 
 class HookType(str, Enum):

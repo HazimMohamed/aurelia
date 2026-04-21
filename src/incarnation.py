@@ -11,8 +11,8 @@ from typing import Optional
 
 import anthropic
 
-from config import AgentConfig, MODEL_HAIKU
-from transcript import (
+from .config import AgentConfig, MODEL_HAIKU
+from .transcript import (
     read_entries,
     write_incarnation_start,
     transcript_to_messages,
