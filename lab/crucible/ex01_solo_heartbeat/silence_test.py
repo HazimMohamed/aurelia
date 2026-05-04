@@ -14,7 +14,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_LAB = Path(__file__).parent.parent
+_LAB = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_LAB))
 sys.path.insert(0, str(_LAB.parent))
 
