@@ -42,7 +42,7 @@ from src.agent.context import build_system_prompt
 from src.transport.client import RuntimeClient
 from .transcript_stream import TranscriptStreamer
 
-COLD_STORAGE_DIR = _ALEMBIC_ROOT / "results" / "cold_storage"
+DEFAULT_COLD_STORAGE_DIR = _ALEMBIC_ROOT / "results" / "cold_storage"
 
 
 class AureliaExperiment:
@@ -52,11 +52,13 @@ class AureliaExperiment:
         experiment_id: str,
         seed_karma: SeedKarma | None = None,
         chain_from: Path | None = None,
+        results_dir: Path | None = None,
     ) -> None:
         self.base_agent = base_agent
         self.experiment_id = experiment_id
         self.seed_karma = seed_karma
         self.chain_from = chain_from
+        self._results_dir = results_dir or DEFAULT_COLD_STORAGE_DIR
 
         self._client = RuntimeClient()
         self._agent = None
@@ -170,10 +172,8 @@ class AureliaExperiment:
     def _save_cold_storage(self) -> None:
         assert self._agent and self._inc and self._start_time
 
-        import uuid as _uuid
         date_str = self._start_time.strftime("%Y-%m-%d")
-        uid = _uuid.uuid4().hex[:8]
-        run_dir = COLD_STORAGE_DIR / f"{date_str}-{self.experiment_id}-{self.base_agent}-{uid}"
+        run_dir = self._results_dir / f"{date_str}-{self.experiment_id}-{self.base_agent}"
         run_dir.mkdir(parents=True, exist_ok=True)
         self.cold_storage_dir = run_dir
 

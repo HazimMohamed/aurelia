@@ -7,6 +7,8 @@ Dispatches N heartbeat cycles to a sandboxed agent using the production
 heartbeat prompt. Optionally reincarnates (bardo + karma transplant) every
 X cycles to observe how the agent develops across lifetimes.
 
+Results land in: lab/crucible/ex01_solo_heartbeat/results/
+
 Usage (run as root):
   sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py
   sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --cycles 5
@@ -17,7 +19,6 @@ Usage (run as root):
 from __future__ import annotations
 
 import argparse
-import random
 import sys
 from pathlib import Path
 
@@ -28,27 +29,10 @@ sys.path.insert(0, str(_LAB.parent))
 from alembic.aurelia_experiment import AureliaExperiment
 from alembic.report import generate_report
 from src.agent.hooks import format_heartbeat_prompt
+from src.utils.names import generate_name
 
-# ── Adjective-noun name generator ─────────────────────────────────────────────
+RESULTS_DIR = Path(__file__).parent / "results"
 
-_ADJECTIVES = [
-    "silent", "hollow", "lucid", "still", "open", "bare", "calm", "dim",
-    "slow", "clear", "cold", "soft", "dark", "lone", "pale", "deep",
-    "quiet", "empty", "vast", "thin", "mild", "dull", "raw", "free",
-]
-
-_NOUNS = [
-    "field", "window", "stone", "ember", "shore", "mist", "light", "echo",
-    "water", "flame", "ridge", "hollow", "dusk", "tide", "root", "ash",
-    "cloud", "vessel", "mirror", "current", "drift", "signal", "epoch", "pulse",
-]
-
-
-def _generate_exp_id() -> str:
-    return f"{random.choice(_ADJECTIVES)}-{random.choice(_NOUNS)}"
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="EX-01: Solo Heartbeat Experiment")
@@ -63,7 +47,7 @@ def main() -> None:
     if args.reincarnate is not None and args.reincarnate >= args.cycles:
         parser.error("--reincarnate must be less than --cycles")
 
-    exp_id = _generate_exp_id()
+    exp_id = generate_name()
     W = 70
 
     print(f"\n{'═' * W}")
@@ -99,6 +83,7 @@ def main() -> None:
             args.agent,
             inc_exp_id,
             chain_from=prev_snapshot,
+            results_dir=RESULTS_DIR,
         ) as exp:
             prompt = format_heartbeat_prompt(exp._agent.config)
             for _ in range(cycles_this_inc):
@@ -118,7 +103,7 @@ def main() -> None:
     if len(run_dirs) == 1:
         report_path = run_dirs[0] / "report.md"
     else:
-        combined_dir = run_dirs[0].parent / f"{run_dirs[0].name.split('-')[0]}-{exp_id}-combined"
+        combined_dir = RESULTS_DIR / f"{exp_id}-combined"
         combined_dir.mkdir(parents=True, exist_ok=True)
         report_path = combined_dir / "report.md"
 
