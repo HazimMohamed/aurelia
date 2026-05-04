@@ -7,3 +7,7 @@ __pycache__/
 dist/
 build/
 *.Zone.Identifier
+venv/
+
+# Lab experiment artifacts
+lab/results/cold_storage/
