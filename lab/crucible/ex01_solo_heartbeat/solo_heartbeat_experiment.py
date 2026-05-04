@@ -4,16 +4,16 @@ EX-01: Solo Heartbeat Experiment
 Question: What does an agent do when left alone with nothing but time?
 
 Dispatches N heartbeat cycles to a sandboxed agent using the production
-heartbeat prompt. Optionally reincarnates (bardo + karma transplant) every
-X cycles to observe how the agent develops across lifetimes.
+heartbeat prompt. Without --reincarnate, all cycles run in a single
+incarnation. With --reincarnate X, bardo is triggered every X cycles and
+karma is transplanted to a fresh incarnation before continuing.
 
 Results land in: lab/crucible/ex01_solo_heartbeat/results/
 
 Usage (run as root):
-  sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py
-  sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --cycles 5
-  sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --cycles 6 --reincarnate 2
-  sudo venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --agent personal --cycles 3
+  sudo /opt/aurelia/.venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py
+  sudo /opt/aurelia/.venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --cycles 5
+  sudo /opt/aurelia/.venv/bin/python3 lab/crucible/ex01_solo_heartbeat/solo_heartbeat_experiment.py --cycles 6 --reincarnate 2
 """
 
 from __future__ import annotations
@@ -32,6 +32,23 @@ from src.agent.hooks import format_heartbeat_prompt
 from src.utils.names import generate_name
 
 RESULTS_DIR = Path(__file__).parent / "results"
+
+
+def _run_incarnation(
+    exp_id: str,
+    agent: str,
+    cycles: int,
+    chain_from: Path | None,
+    W: int,
+) -> Path:
+    with AureliaExperiment(exp_id=exp_id, base_agent=agent, chain_from=chain_from, results_dir=RESULTS_DIR) as exp:
+        prompt = format_heartbeat_prompt(exp._agent.config)
+        for i in range(cycles):
+            print(f"\n{'─' * W}")
+            print(f"  Cycle {i + 1} / {cycles}")
+            print(f"{'─' * W}\n")
+            exp.dispatch_heartbeat(prompt)
+    return exp.cold_storage_dir
 
 
 def main() -> None:
@@ -57,44 +74,36 @@ def main() -> None:
     print(f"  Question: what does an agent do when left alone with nothing but time?")
     print(f"{'═' * W}\n")
 
-    reincarnate_every = args.reincarnate
-    total_cycles = args.cycles
-    cycle_num = 0
-    incarnation = 0
-    prev_snapshot: Path | None = None
     run_dirs: list[Path] = []
 
-    while cycle_num < total_cycles:
-        incarnation += 1
-        cycles_this_inc = (
-            min(reincarnate_every, total_cycles - cycle_num)
-            if reincarnate_every
-            else total_cycles - cycle_num
-        )
+    if not args.reincarnate:
+        # Single incarnation — stay live for all cycles
+        run_dirs.append(_run_incarnation(exp_id, args.agent, args.cycles, None, W))
+    else:
+        # Multiple incarnations — bardo between each group of X cycles
+        total_cycles = args.cycles
+        reincarnate_every = args.reincarnate
+        cycle_num = 0
+        incarnation = 0
+        prev_snapshot: Path | None = None
 
-        inc_exp_id = f"{exp_id}-i{incarnation}" if reincarnate_every else exp_id
+        while cycle_num < total_cycles:
+            incarnation += 1
+            cycles_this_inc = min(reincarnate_every, total_cycles - cycle_num)
 
-        if reincarnate_every:
-            print(f"\n{'─' * W}")
+            print(f"\n{'═' * W}")
             print(f"  Incarnation {incarnation}  (cycles {cycle_num + 1}–{cycle_num + cycles_this_inc})")
-            print(f"{'─' * W}\n")
+            print(f"{'═' * W}")
 
-        with AureliaExperiment(
-            args.agent,
-            inc_exp_id,
-            chain_from=prev_snapshot,
-            results_dir=RESULTS_DIR,
-        ) as exp:
-            prompt = format_heartbeat_prompt(exp._agent.config)
-            for _ in range(cycles_this_inc):
-                cycle_num += 1
-                exp.dispatch_heartbeat(prompt)
+            inc_exp_id = f"{exp_id}-i{incarnation}"
+            cold_dir = _run_incarnation(inc_exp_id, args.agent, cycles_this_inc, prev_snapshot, W)
+            run_dirs.append(cold_dir)
+            prev_snapshot = cold_dir / "snapshot"
+            cycle_num += cycles_this_inc
 
-        run_dirs.append(exp.cold_storage_dir)
-        prev_snapshot = exp.cold_storage_dir / "snapshot"
-
+    incarnations = len(run_dirs)
     print(f"\n{'═' * W}")
-    print(f"  {total_cycles} cycle(s) across {incarnation} incarnation(s) complete.")
+    print(f"  {args.cycles} cycle(s) across {incarnations} incarnation(s) complete.")
     print(f"{'═' * W}\n")
 
     print("  [ summarizing ] Generating lab report via Sonnet...", flush=True)
