@@ -8,6 +8,7 @@ dist/
 build/
 *.Zone.Identifier
 venv/
+ui/node_modules/
 
 # Lab experiment artifacts
 lab/crucible/*/results/
