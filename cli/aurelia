@@ -982,6 +982,82 @@ def cmd_agent_bardo(name: str) -> None:
     console.print()
 
 
+# ── aurelia agent create / destroy ───────────────────────────────────────────
+
+@cmd_agent.command("create")
+@click.argument("name")
+@click.option("--model", default=None, help="LLM model (default: claude-sonnet-4-6).")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_agent_create(name: str, model: str | None, yes: bool) -> None:
+    """Provision a new permanent agent and reload the runtime registry."""
+    console.print(f"\n  [bold]Creating agent:[/bold] {escape(name)}\n")
+
+    if not yes:
+        click.confirm("  This requires root privileges. Continue?", default=True, abort=True)
+
+    from src.samsara.provisioning import create_agent
+    from src.samsara.config import MODEL_SONNET
+
+    try:
+        config = create_agent(name=name, model=model or MODEL_SONNET)
+        console.print(f"  [green]✓ Agent '{escape(name)}' provisioned[/green]")
+        console.print(f"    home:  [dim]{config.home}[/dim]")
+        console.print(f"    model: [dim]{config.model}[/dim]")
+    except Exception as e:
+        console.print(f"  [red]✗ Provisioning failed:[/red] {e}\n")
+        return
+
+    if _runtime_ok():
+        _socket_call({"type": "registry_reload"})
+        console.print("  [dim]Registry reloaded[/dim]")
+    else:
+        console.print("  [yellow]~ Runtime not running — start it to register the new agent[/yellow]")
+
+    console.print()
+
+
+@cmd_agent.command("destroy")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_agent_destroy(name: str, yes: bool) -> None:
+    """Permanently destroy an agent — removes home dir, user, FIFO, and config."""
+    console.print(f"\n  [bold yellow]Destroy agent:[/bold yellow] {escape(name)}")
+    console.print("  [dim]This will delete the home directory, Linux user, and all memory.[/dim]\n")
+
+    if not yes:
+        click.confirm("  Are you sure?", default=False, abort=True)
+
+    # Stop daemon if running
+    pid = _read_pid(f"agent-{name}")
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not _pid_alive(pid):
+                    break
+                time.sleep(0.1)
+            console.print(f"  [dim]Stopped agent daemon (pid={pid})[/dim]")
+        except OSError:
+            pass
+        (PIDS_DIR / f"agent-{name}.pid").unlink(missing_ok=True)
+
+    from src.samsara.provisioning import destroy_agent
+
+    try:
+        destroy_agent(name)
+        console.print(f"  [green]✓ Agent '{escape(name)}' destroyed[/green]")
+    except Exception as e:
+        console.print(f"  [red]✗ Destroy failed:[/red] {e}\n")
+        return
+
+    if _runtime_ok():
+        _socket_call({"type": "registry_reload"})
+        console.print("  [dim]Registry reloaded[/dim]")
+
+    console.print()
+
+
 # ── aurelia scheduler ─────────────────────────────────────────────────────────
 
 @cli.group("scheduler")
