@@ -220,6 +220,8 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         akasha_transcript = akasha_dir / f"{incarnation_name}-transcript.jsonl"
         shutil.copy2(transcript_path, akasha_transcript)
         _set_permissions_safe(akasha_transcript, 0o640)
+        from ..agent.tools.process_tools import cleanup_incarnation_processes
+        cleanup_incarnation_processes(Path("/home") / agent_config.name, incarnation_name)
         symlink = agent_config.current_symlink
         if symlink.is_symlink():
             symlink.unlink()
@@ -314,12 +316,17 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
             shutil.rmtree(akasha_scratch)
         shutil.copytree(scratch_dir, akasha_scratch)
 
-    # 6. Remove current symlink
+    # 6. Kill any background processes started by this incarnation
+    from ..agent.tools.process_tools import cleanup_incarnation_processes
+    agent_home = Path("/home") / agent_config.name
+    cleanup_incarnation_processes(agent_home, incarnation_name)
+
+    # 7. Remove current symlink
     symlink = agent_config.current_symlink
     if symlink.is_symlink():
         symlink.unlink()
 
-    # 7. Clean karma incarnation folder
+    # 8. Clean karma incarnation folder
     shutil.rmtree(incarnation_dir)
 
     return {

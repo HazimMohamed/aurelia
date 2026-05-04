@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..samsara.config import AgentConfig
+from ..samsara.config import AgentConfig, DHARMA_DIR
 from .transcript import transcript_to_messages
 
 
@@ -20,63 +20,75 @@ def _read_file_safe(path: Path) -> str:
     return ""
 
 
+def _render_plane(config: AgentConfig) -> str:
+    """Load plane.md and substitute agent-specific path variables."""
+    template = _read_file_safe(DHARMA_DIR / "plane.md")
+    if not template:
+        return ""
+    scratch_dir = config.karma_dir / "current" / "scratch"
+    replacements = {
+        "{agent_name}": config.name.capitalize(),
+        "{karma_dir}": str(config.karma_dir),
+        "{room_dir}": str(config.room_dir),
+        "{scratch_dir}": str(scratch_dir),
+        "{akasha_dir}": str(config.akasha_dir),
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
 def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     """
     Build full system prompt:
-    constitution + identity + semantic core + episodic core +
-    hazim introduction + shared hazim context + room mention.
+    plane + identity + character files + semantic core + episodic core +
+    hazim introduction + shared hazim context.
     """
     from ..memory.memory import (
         load_semantic_core,
         load_episodic_core,
-        load_hazim_introduction,
         load_shared_hazim_context,
     )
 
     parts = []
 
-    # 1. Constitution (dharma)
-    constitution = _read_file_safe(config.constitution_path)
-    if constitution:
-        parts.append(constitution)
+    # 1. The plane — universal mechanics, rendered with agent-specific paths
+    plane = _render_plane(config)
+    if plane:
+        parts.append(plane)
 
-    # 2. Identity files (character.md, contract.md, values.md)
+    # 2. Identity — agent mission and character (dharma/identity.md in agent home)
+    identity = _read_file_safe(config.identity_path)
+    if identity:
+        parts.append(identity)
+
+    # 3. Character files (character.md, contract.md, values.md)
     if config.identity_dir.exists():
-        for identity_file in sorted(config.identity_dir.iterdir()):
-            if identity_file.suffix == ".md":
-                content = _read_file_safe(identity_file)
+        for f in sorted(config.identity_dir.iterdir()):
+            if f.suffix == ".md":
+                content = _read_file_safe(f)
                 if content:
-                    parts.append(f"## {identity_file.stem.capitalize()}\n{content}")
+                    parts.append(f"## {f.stem.capitalize()}\n{content}")
 
-    # 3. Semantic core — always loaded, size-capped ~500 tokens
+    # 4. Semantic core — always loaded, size-capped ~500 tokens
     semantic_core = load_semantic_core(config)
     if semantic_core:
         parts.append(semantic_core)
 
-    # 4. Episodic core — formative experiences, always loaded
+    # 5. Episodic core — formative experiences, always loaded
     episodic_core = load_episodic_core(config)
     if episodic_core:
         parts.append(episodic_core)
 
-    # 5. Hazim introduction
-    hazim_intro = load_hazim_introduction()
+    # 6. Hazim introduction — from dharma/hazim_introduction.md
+    hazim_intro = _read_file_safe(DHARMA_DIR / "hazim_introduction.md")
     if hazim_intro:
         parts.append(f"## About Hazim (God-lite)\n{hazim_intro}")
 
-    # 6. Shared hazim context — top scored entries
+    # 7. Shared hazim context — top scored entries
     shared_context = load_shared_hazim_context()
     if shared_context:
         parts.append(shared_context)
-
-    # 7. Room mention — permanent space
-    room_dir = config.room_dir
-    parts.append(
-        f"## Your Room\n"
-        f"Your permanent space is at `{room_dir}/`. "
-        f"Things you put there persist across all incarnations. "
-        f"Your scratch folder is at `{config.karma_dir}/current/scratch/` — "
-        f"private workspace for this incarnation, archived to Akashic after bardo."
-    )
 
     return "\n\n---\n\n".join(parts) if parts else "You are a helpful AI agent."
 

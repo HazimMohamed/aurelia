@@ -21,9 +21,15 @@ class AgentRegistry:
         self._refresh()
 
     def _refresh(self) -> None:
-        """Scan filesystem for known agents and load their configs."""
+        """Scan filesystem and reconcile — adds new agents, removes deleted ones."""
+        known = set(list_known_agents())
         with self._lock:
-            for agent_name in list_known_agents():
+            # Remove agents whose home dirs are gone
+            stale = [name for name in self._configs if name not in known]
+            for name in stale:
+                del self._configs[name]
+            # Add newly discovered agents
+            for agent_name in known:
                 if agent_name not in self._configs:
                     try:
                         self._configs[agent_name] = load_agent_config(agent_name)

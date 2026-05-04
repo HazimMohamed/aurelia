@@ -264,6 +264,7 @@ def _handle_connection(conn: socket.socket) -> None:
                         f"type={req_type} agent={agent} status=ok stream=true duration_ms={duration_ms}"
                     )
                 except Exception as exc:
+                    import traceback as _tb
                     duration_ms = int((time.monotonic() - t_start) * 1000)
                     send_frame({
                         "type": "done",
@@ -275,7 +276,8 @@ def _handle_connection(conn: socket.socket) -> None:
                     log.error(
                         f"{_now_iso()} pid={pid} uid={uid} gid={gid} "
                         f"type={req_type} agent={agent} status=error stream=true "
-                        f"duration_ms={duration_ms} error={type(exc).__name__}: {exc}"
+                        f"duration_ms={duration_ms} error={type(exc).__name__}: {exc}\n"
+                        + _tb.format_exc()
                     )
                 return
 
@@ -295,6 +297,7 @@ def _handle_connection(conn: socket.socket) -> None:
                     f"type={req_type} agent={agent} status=ok duration_ms={duration_ms}"
                 )
             except Exception as exc:
+                import traceback as _tb
                 duration_ms = int((time.monotonic() - t_start) * 1000)
                 response = {
                     "id": req_id,
@@ -305,7 +308,8 @@ def _handle_connection(conn: socket.socket) -> None:
                 log.error(
                     f"{_now_iso()} pid={pid} uid={uid} gid={gid} "
                     f"type={req_type} agent={agent} status=error "
-                    f"duration_ms={duration_ms} error={type(exc).__name__}: {exc}"
+                    f"duration_ms={duration_ms} error={type(exc).__name__}: {exc}\n"
+                    + _tb.format_exc()
                 )
 
             conn.sendall(json.dumps(response).encode("utf-8") + b"\n")

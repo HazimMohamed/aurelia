@@ -1,24 +1,30 @@
 {
-  "name": "openclaw-control-ui",
+  "name": "aurelia-ui",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "start": "VITE_BACKEND_PORT=18789 vite",
-    "test": "vitest run --config vitest.config.ts"
+    "start": "VITE_BACKEND_PORT=18789 vite"
   },
   "dependencies": {
-    "@noble/ed25519": "3.0.0",
+    "clsx": "^2.1.1",
     "dompurify": "^3.3.1",
     "lit": "^3.3.2",
+    "lucide-react": "^0.468.0",
     "marked": "^17.0.2",
-    "vite": "7.3.1"
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "react-textarea-autosize": "^8.5.4",
+    "vite": "7.3.1",
+    "zustand": "^5.0.2"
   },
   "devDependencies": {
-    "@vitest/browser-playwright": "4.0.18",
-    "playwright": "^1.58.2",
-    "vitest": "4.0.18"
+    "@types/dompurify": "^3.0.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4"
   }
 }

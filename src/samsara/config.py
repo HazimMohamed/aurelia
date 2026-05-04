@@ -9,6 +9,7 @@ from typing import Optional
 
 GLOBAL_CONFIG_PATH = Path("/var/aurelia/config.json")
 AGENT_HOME_BASE = Path("/home")
+DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
 
 # Model IDs
 MODEL_HAIKU = "claude-haiku-4-5-20251001"
@@ -84,8 +85,8 @@ class AgentConfig:
         return self.home / "dharma"
 
     @property
-    def constitution_path(self) -> Path:
-        return self.dharma_dir / "constitution.md"
+    def identity_path(self) -> Path:
+        return self.dharma_dir / "identity.md"
 
     @property
     def current_symlink(self) -> Path:
@@ -180,11 +181,14 @@ def load_agent_config(agent_name: str) -> AgentConfig:
 
 
 def list_known_agents() -> list[str]:
-    """Return agent names that have a home dir and agent.json."""
+    """Return agent names from global config that also have a home dir."""
+    if not GLOBAL_CONFIG_PATH.exists():
+        return []
+    with GLOBAL_CONFIG_PATH.open() as f:
+        cfg = json.load(f)
     agents = []
-    if not AGENT_HOME_BASE.exists():
-        return agents
-    for entry in sorted(AGENT_HOME_BASE.iterdir()):
-        if entry.is_dir() and (entry / "agent.json").exists():
-            agents.append(entry.name)
-    return agents
+    for name in cfg.get("agents", {}):
+        home = AGENT_HOME_BASE / name
+        if home.is_dir():
+            agents.append(name)
+    return sorted(agents)

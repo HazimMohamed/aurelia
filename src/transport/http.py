@@ -15,6 +15,7 @@ if _env_path.exists():
     load_dotenv(_env_path)
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, model_validator
 
@@ -31,6 +32,13 @@ from ..samsara.scheduler import (
 )
 
 app = FastAPI(title="Aurelia", version="0.4.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────────
@@ -107,6 +115,20 @@ def _runtime_error_to_http(e: RuntimeError) -> HTTPException:
     if "IncarnationNotActive" in msg:
         return HTTPException(status_code=409, detail=msg)
     return HTTPException(status_code=500, detail=msg)
+
+
+def _classify_anthropic_error(e: Exception) -> HTTPException:
+    """Map Anthropic API errors to appropriate HTTP status codes."""
+    cls = type(e).__name__
+    msg = str(e)
+    status_code = getattr(e, "status_code", None)
+    if status_code == 529 or "overloaded" in msg.lower() or "OverloadedError" in cls:
+        return HTTPException(status_code=503, detail=f"Anthropic API overloaded, please retry: {e}")
+    if status_code == 429 or "rate" in msg.lower():
+        return HTTPException(status_code=429, detail=f"Anthropic API rate limit: {e}")
+    if status_code == 401 or "auth" in msg.lower():
+        return HTTPException(status_code=401, detail=f"Anthropic API authentication error: {e}")
+    return HTTPException(status_code=500, detail=f"Anthropic API error: {e}")
 
 
 # ── Request / Response models ──────────────────────────────────────────────────
@@ -311,7 +333,7 @@ def post_message(req: MessageRequest) -> MessageResponse:
     except ConnectionError as e:
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent cycle failed: {e}")
+        raise _classify_anthropic_error(e)
 
     return MessageResponse(
         agent=response.agent,
@@ -449,6 +471,7 @@ def list_agent_incarnations(agent_name: str) -> dict:
         "incarnations": [
             {
                 "name": i.name,
+                "agent": i.agent,
                 "status": i.status,
                 "cycle": i.cycle,
                 "last_active": i.last_active,
@@ -481,6 +504,19 @@ def list_agents() -> dict:
             for a in agents
         ]
     }
+
+
+@app.post("/agents/{agent_name}/spawn")
+def spawn_incarnation(agent_name: str) -> dict:
+    """Spawn a new incarnation for an agent. Returns the new incarnation name."""
+    _require_agent(agent_name)
+    try:
+        result = runtime.spawn(agent_name)
+        return {"agent": agent_name, "incarnation": result.name, "status": result.status}
+    except (RuntimeError, ConnectionError) as e:
+        raise _runtime_error_to_http(RuntimeError(str(e)))
+    except Exception as e:
+        raise _classify_anthropic_error(e)
 
 
 # ── Bardo (manual testing tool) ───────────────────────────────────────────────

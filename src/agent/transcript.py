@@ -130,27 +130,105 @@ def write_bardo_complete(transcript_path: Path, incarnation_name: str, cycle: in
 
 
 def transcript_to_messages(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert transcript entries to Anthropic messages format (human/assistant pairs).
+    """Convert transcript entries to Anthropic messages format.
 
-    If an assistant turn included thinking blocks they are reconstructed as a
-    content array — the Anthropic API requires thinking blocks to be present in
-    subsequent requests when extended thinking was enabled for that turn.
+    Reconstructs tool_use/tool_result pairs so the agent has full context of
+    what it did in prior cycles. Thinking blocks are preserved as required by
+    the Anthropic API when extended thinking was enabled for that turn.
     """
-    messages = []
-    for entry in entries:
+    messages: list[dict[str, Any]] = []
+
+    # Group consecutive entries by cycle into logical turns.
+    # Within a cycle: assistant_message may be preceded by tool_call/tool_result pairs.
+    # We collect them and emit:
+    #   assistant turn: [thinking?, tool_use*, text?]
+    #   user turn:      [tool_result*]  (one per tool call)
+    # then the next human_message as a normal user turn.
+
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
         entry_type = entry.get("type")
-        content = entry.get("content", "")
-        if entry_type == "human_message" and content:
-            messages.append({"role": "user", "content": content})
-        elif entry_type == "assistant_message" and content:
+
+        if entry_type == "human_message":
+            content = entry.get("content", "")
+            if content:
+                messages.append({"role": "user", "content": content})
+            i += 1
+
+        elif entry_type == "tool_call":
+            # Collect all tool_call + tool_result pairs for this assistant turn,
+            # followed by the assistant_message that summarised the results.
+            cycle = entry.get("cycle")
+            assistant_content: list[dict[str, Any]] = []
+            tool_results: list[dict[str, Any]] = []
+
+            while i < len(entries) and entries[i].get("type") in ("tool_call", "tool_result"):
+                e = entries[i]
+                if e.get("type") == "tool_call":
+                    assistant_content.append({
+                        "type": "tool_use",
+                        "id": e.get("tool_use_id", ""),
+                        "name": e.get("tool_name", ""),
+                        "input": e.get("tool_input", {}),
+                    })
+                elif e.get("type") == "tool_result":
+                    result = e.get("result", "")
+                    result_text = (
+                        result if isinstance(result, str)
+                        else json.dumps(result, ensure_ascii=False)
+                    )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": e.get("tool_use_id", ""),
+                        "content": result_text,
+                    })
+                i += 1
+
+            # Collect assistant_message for the same cycle (text emitted AFTER tool_results)
+            asst_text_content: list[dict[str, Any]] = []
+            if (i < len(entries)
+                    and entries[i].get("type") == "assistant_message"
+                    and entries[i].get("cycle") == cycle):
+                asst = entries[i]
+                thinking_blocks = asst.get("thinking_blocks")
+                if thinking_blocks:
+                    for tb in thinking_blocks:
+                        asst_text_content.append({
+                            "type": "thinking",
+                            "thinking": tb["thinking"],
+                            "signature": tb["signature"],
+                        })
+                text = asst.get("content", "")
+                if text:
+                    asst_text_content.append({"type": "text", "text": text})
+                i += 1
+
+            if assistant_content:
+                messages.append({"role": "assistant", "content": assistant_content})
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+            # Text turn comes after tool_results, as a separate assistant message
+            if asst_text_content:
+                messages.append({"role": "assistant", "content": asst_text_content})
+
+        elif entry_type == "assistant_message":
+            content = entry.get("content", "")
             thinking_blocks = entry.get("thinking_blocks")
             if thinking_blocks:
                 message_content: list[dict[str, Any]] = [
                     {"type": "thinking", "thinking": tb["thinking"], "signature": tb["signature"]}
                     for tb in thinking_blocks
                 ]
-                message_content.append({"type": "text", "text": content})
+                if content:
+                    message_content.append({"type": "text", "text": content})
                 messages.append({"role": "assistant", "content": message_content})
-            else:
+            elif content:
                 messages.append({"role": "assistant", "content": content})
+            i += 1
+
+        else:
+            # incarnation_start, bardo_complete, etc. — skip
+            i += 1
+
     return messages

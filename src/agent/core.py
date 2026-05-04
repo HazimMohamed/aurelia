@@ -168,7 +168,8 @@ def _run_with_tools(
     }
     if tools:
         create_kwargs["tools"] = tools
-    if config.thinking_budget_tokens:
+    use_thinking = bool(config.thinking_budget_tokens)
+    if use_thinking:
         create_kwargs["thinking"] = {
             "type": "enabled",
             "budget_tokens": config.thinking_budget_tokens,
@@ -181,16 +182,23 @@ def _run_with_tools(
     while tool_cycle < MAX_TOOL_CYCLES:
         create_kwargs["messages"] = messages
 
-        with client.messages.stream(**create_kwargs) as stream:
-            for event in stream:
-                if event.type == "content_block_delta" and stream_callback:
-                    delta = event.delta
-                    if delta.type == "thinking_delta":
-                        stream_callback({"type": "thinking_delta", "content": delta.thinking})
-                    elif delta.type == "text_delta":
-                        stream_callback({"type": "delta", "content": delta.text})
-
-            final = stream.get_final_message()
+        if use_thinking:
+            # thinking is not supported by stream() — use blocking create()
+            final = client.messages.create(**create_kwargs)
+            if stream_callback:
+                for block in final.content:
+                    if block.type == "thinking":
+                        stream_callback({"type": "thinking_delta", "content": block.thinking})
+                    elif block.type == "text":
+                        stream_callback({"type": "delta", "content": block.text})
+        else:
+            with client.messages.stream(**create_kwargs) as stream:
+                for event in stream:
+                    if event.type == "content_block_delta" and stream_callback:
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            stream_callback({"type": "delta", "content": delta.text})
+                final = stream.get_final_message()
 
         if hasattr(final, "usage") and final.usage:
             total_tokens += (

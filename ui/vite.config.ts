@@ -1,21 +1,15 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 function normalizeBase(input: string): string {
   const trimmed = input.trim();
-  if (!trimmed) {
-    return "/";
-  }
-  if (trimmed === "./") {
-    return "./";
-  }
-  if (trimmed.endsWith("/")) {
-    return trimmed;
-  }
-  return `${trimmed}/`;
+  if (!trimmed) return "/";
+  if (trimmed === "./") return "./";
+  return trimmed.endsWith("/") ? trimmed : `${trimmed}/`;
 }
 
 export default defineConfig(() => {
@@ -23,16 +17,8 @@ export default defineConfig(() => {
   const base = envBase ? normalizeBase(envBase) : "./";
   return {
     base,
+    plugins: [react()],
     publicDir: path.resolve(here, "public"),
-    resolve: {
-      alias: {
-        "../../../src": path.resolve(here, "../src"),
-        "../../src": path.resolve(here, "../src"),
-      },
-    },
-    optimizeDeps: {
-      include: ["lit/directives/repeat.js"],
-    },
     build: {
       outDir: path.resolve(here, "../dist/control-ui"),
       emptyOutDir: true,

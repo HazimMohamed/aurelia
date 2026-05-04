@@ -1,0 +1,8 @@
+#!/bin/bash
+set -a
+source /opt/aurelia/.env
+set +a
+
+export PYTHONPATH="/opt/aurelia"
+cd /opt/aurelia
+exec /opt/aurelia/venv/bin/python3 -m src.samsara.runtime_daemon

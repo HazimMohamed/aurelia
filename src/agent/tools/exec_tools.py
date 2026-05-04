@@ -21,7 +21,11 @@ BASH_EXEC_SCHEMA = {
         "  • Read files:  cat /path/to/file\n"
         "  • Write files: echo 'content' > /path/to/file  or use python3 -c \"Path(...).write_text(...)\"\n"
         "Output is truncated at 8000 chars stdout / 2000 chars stderr. "
-        "Default timeout is 30s — pass timeout_seconds to override (max 120)."
+        "Default timeout is 30s — pass timeout_seconds to override (max 120).\n\n"
+        "WARNING: Background commands DO NOT work here. Running 'cmd &' or 'nohup cmd &' will "
+        "appear to succeed but the process will die immediately when this tool call returns. "
+        "Use process_start instead for anything that needs to keep running: HTTP servers, "
+        "long scripts, watchers, etc."
     ),
     "input_schema": {
         "type": "object",
@@ -68,9 +72,15 @@ def handle_bash_exec(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     if not cwd.exists():
         cwd = Path.home()
 
+    agent_name = agent_config.name if agent_config else None
+    cmd = (
+        ["sudo", "-u", agent_name, "/bin/bash", "-c", command]
+        if agent_name else ["/bin/bash", "-c", command]
+    )
+
     try:
         result = subprocess.run(
-            ["/bin/bash", "-c", command],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,

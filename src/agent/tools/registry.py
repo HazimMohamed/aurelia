@@ -49,6 +49,7 @@ def build_tool_registry(
     """Build and return the tool registry for a given incarnation context."""
     from .core_tools import register_core_tools
     from .exec_tools import register_exec_tools
+    from .process_tools import register_process_tools
     from .comms_tools import register_comms_tools
     from .agent_tools import register_agent_tools
 
@@ -57,8 +58,9 @@ def build_tool_registry(
     # Core tools always available
     register_core_tools(registry, agent_config, incarnation_state, api_url)
 
-    # bash_exec: general-purpose compute (web, files, python, etc.)
+    # bash_exec: blocking commands; process_*: background/persistent processes
     register_exec_tools(registry, agent_config)
+    register_process_tools(registry, agent_config, incarnation=incarnation_state.get("name", "unknown"))
 
     # Communication tools for most hooks
     if hook_type in ("human_message", "heartbeat", "scheduled_task", "agent_invite"):
