@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/aurelia/.venv/bin/python3
 """aurelia — God-lite's control interface for the plane."""
 
 from __future__ import annotations
@@ -377,15 +377,28 @@ def cmd_start(with_http: bool) -> None:
         runtime_pid = _read_pid("runtime")
         console.print(f"  [dim]Runtime daemon already running (pid={runtime_pid})[/dim]")
     else:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        daemon_log = LOGS_DIR / f"runtime-{ts}.log"
         try:
+            log_file = open(daemon_log, "a")
+            site_packages = "/opt/aurelia/.venv/lib/python3.11/site-packages"
+            os.environ["PYTHONPATH"] = f"{site_packages}:{PROJECT_ROOT}"
+            for k in ("ANTHROPIC_API_KEY", "DISCORD_TOKEN", "OPENROUTER_API_KEY"):
+                if env.get(k):
+                    os.environ[k] = env[k]
+            preserve = "PYTHONPATH,ANTHROPIC_API_KEY,DISCORD_TOKEN,OPENROUTER_API_KEY"
             proc = subprocess.Popen(
-                [sys.executable, "-m", "src.samsara.runtime_daemon"],
+                ["sudo", "-u", "aurelia", f"--preserve-env={preserve}",
+                 "/opt/aurelia/.venv/bin/python3", "-m", "src.samsara.runtime_daemon"],
                 cwd=str(PROJECT_ROOT),
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
                 start_new_session=True,
             )
+            # proc.pid is the sudo wrapper; the actual runtime PID is its child.
+            # We write a placeholder and update it after the socket is live.
             (PIDS_DIR / "runtime.pid").write_text(str(proc.pid))
         except Exception as e:
             console.print(f"  [red]✗ Failed to start runtime daemon:[/red] {e}\n")
@@ -399,9 +412,26 @@ def cmd_start(with_http: bool) -> None:
             time.sleep(0.3)
         else:
             console.print()
-            console.print("  [red]✗ Timed out waiting for runtime socket[/red]\n")
+            console.print("  [red]✗ Timed out waiting for runtime socket[/red]")
+            if daemon_log.exists():
+                tail = daemon_log.read_text().strip().splitlines()[-20:]
+                console.print(f"\n  [dim]── {daemon_log} (last {len(tail)} lines) ──[/dim]")
+                for line in tail:
+                    console.print(f"  [red]{line}[/red]")
+            console.print()
             return
-        runtime_pid = _read_pid("runtime")
+        # Parse the real runtime PID from the daemon log and update the PID file.
+        import re as _re
+        runtime_pid = proc.pid
+        try:
+            for line in daemon_log.read_text().splitlines():
+                m = _re.search(r"\[runtime_daemon\] Starting \(pid=(\d+)", line)
+                if m:
+                    runtime_pid = int(m.group(1))
+                    (PIDS_DIR / "runtime.pid").write_text(str(runtime_pid))
+                    break
+        except OSError:
+            pass
         console.print(f"\r  [green]✓ Runtime is live (pid={runtime_pid})[/green]          ")
 
     # ── HTTP transport (optional) ─────────────────────────────────────────────
@@ -467,6 +497,16 @@ def cmd_stop(http_only: bool) -> None:
 
     def _stop_pid(name: str, label: str) -> None:
         pid = _read_pid(name)
+        # Fallback: if no PID file but socket is live, find the owning process
+        if not _pid_alive(pid) and name == "runtime" and SOCKET_PATH.exists():
+            try:
+                result = subprocess.run(
+                    ["fuser", str(SOCKET_PATH)], capture_output=True, text=True
+                )
+                pids = result.stdout.strip().split()
+                pid = int(pids[0]) if pids else None
+            except Exception:
+                pid = None
         if pid and _pid_alive(pid):
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -489,6 +529,113 @@ def cmd_stop(http_only: bool) -> None:
         _stop_pid("http", "HTTP transport")
         _stop_pid("runtime", "Runtime daemon")
         console.print("  [dim]Plane offline.[/dim]")
+
+    console.print()
+
+
+# ── aurelia restart ───────────────────────────────────────────────────────────
+
+@cli.command("restart")
+@click.option("--http", "with_http", is_flag=True, help="Also restart HTTP transport.")
+def cmd_restart(with_http: bool) -> None:
+    """Stop and restart the runtime daemon (and optionally HTTP transport)."""
+    console.print("\n  [bold]Restarting Aurelia...[/bold]\n")
+
+    # ── Stop ──────────────────────────────────────────────────────────────────
+    def _stop_pid(name: str, label: str) -> None:
+        pid = _read_pid(name)
+        if not _pid_alive(pid) and name == "runtime" and SOCKET_PATH.exists():
+            try:
+                result = subprocess.run(
+                    ["fuser", str(SOCKET_PATH)], capture_output=True, text=True
+                )
+                pids = result.stdout.strip().split()
+                pid = int(pids[0]) if pids else None
+            except Exception:
+                pid = None
+        if pid and _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    if not _pid_alive(pid):
+                        break
+                    time.sleep(0.2)
+                console.print(f"  [dim]✓ {label} stopped[/dim]")
+            except OSError as e:
+                console.print(f"  [yellow]~ Could not stop {label}: {e}[/yellow]")
+        else:
+            console.print(f"  [dim]{label} was not running[/dim]")
+        (PIDS_DIR / f"{name}.pid").unlink(missing_ok=True)
+
+    if with_http:
+        _stop_pid("http", "HTTP transport")
+    _stop_pid("runtime", "Runtime daemon")
+
+    # Brief pause to let the socket release
+    time.sleep(0.5)
+
+    # ── Start ─────────────────────────────────────────────────────────────────
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    env = _load_env()
+
+    from datetime import datetime as _dt
+    ts = _dt.now().strftime("%Y%m%d-%H%M%S")
+    daemon_log = LOGS_DIR / f"runtime-{ts}.log"
+    try:
+        log_file = open(daemon_log, "a")
+        site_packages = "/opt/aurelia/.venv/lib/python3.11/site-packages"
+        os.environ["PYTHONPATH"] = f"{site_packages}:{PROJECT_ROOT}"
+        for k in ("ANTHROPIC_API_KEY", "DISCORD_TOKEN", "OPENROUTER_API_KEY"):
+            if env.get(k):
+                os.environ[k] = env[k]
+        preserve = "PYTHONPATH,ANTHROPIC_API_KEY,DISCORD_TOKEN,OPENROUTER_API_KEY"
+        proc = subprocess.Popen(
+            ["sudo", "-u", "aurelia", f"--preserve-env={preserve}",
+             "/opt/aurelia/.venv/bin/python3", "-m", "src.samsara.runtime_daemon"],
+            cwd=str(PROJECT_ROOT),
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+        )
+        (PIDS_DIR / "runtime.pid").write_text(str(proc.pid))
+    except Exception as e:
+        console.print(f"  [red]✗ Failed to start runtime daemon:[/red] {e}\n")
+        return
+
+    console.print("  [dim]Waiting for runtime socket...[/dim]", end="")
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        if SOCKET_PATH.exists() and _runtime_ok():
+            break
+        time.sleep(0.3)
+    else:
+        console.print()
+        console.print("  [red]✗ Timed out waiting for runtime socket[/red]")
+        if daemon_log.exists():
+            tail = daemon_log.read_text().strip().splitlines()[-20:]
+            console.print(f"\n  [dim]── {daemon_log} (last {len(tail)} lines) ──[/dim]")
+            for line in tail:
+                console.print(f"  [red]{line}[/red]")
+        console.print()
+        return
+
+    import re as _re
+    runtime_pid = proc.pid
+    try:
+        for line in daemon_log.read_text().splitlines():
+            m = _re.search(r"\[runtime_daemon\] Starting \(pid=(\d+)", line)
+            if m:
+                runtime_pid = int(m.group(1))
+                (PIDS_DIR / "runtime.pid").write_text(str(runtime_pid))
+                break
+    except OSError:
+        pass
+    console.print(f"\r  [green]✓ Runtime is live (pid={runtime_pid})[/green]          ")
+
+    if with_http:
+        _start_http(env)
 
     console.print()
 

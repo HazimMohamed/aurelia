@@ -91,6 +91,10 @@ def spawn_incarnation(config: AgentConfig) -> str:
     transcript_path = incarnation_dir / "transcript.jsonl"
     write_incarnation_start(transcript_path, incarnation_name, cycle=0)
 
+    # Give the agent write access to scratch; transcript stays aurelia-owned
+    import subprocess as _sp
+    _sp.run(["chown", config.name, str(scratch_dir)], capture_output=True)
+
     # Update current symlink
     symlink = config.current_symlink
     if symlink.is_symlink() or symlink.exists():

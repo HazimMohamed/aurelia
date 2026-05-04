@@ -174,15 +174,6 @@ def dispatch(
         stream_callback=stream_callback,
     )
 
-    # Trigger bardo if agent signalled done
-    if next_action.get("type") == "done":
-        active_name = get_active_incarnation(config)
-        if active_name:
-            try:
-                run_bardo(config, active_name)
-            except Exception as e:
-                print(f"[runtime] Bardo after done failed: {e}")
-
     return AgentResponse(
         agent=agent,
         incarnation=incarnation_state["name"],
@@ -389,14 +380,6 @@ def run_hook(
         hook_type=hook_type,
         tool_registry=tool_registry,
     )
-
-    if next_action.get("type") == "done":
-        active_name = get_active_incarnation(config)
-        if active_name:
-            try:
-                run_bardo(config, active_name)
-            except Exception as e:
-                print(f"[runtime] Bardo after done failed: {e}")
 
     return response_text, next_action
 

@@ -244,23 +244,23 @@ schedule_task + done → manual memory flush
 
 JSON, embedded at the end of the agent's textual response.
 
-```json
-{ "next": { "type": "done" } }
-```
+**Bardo is triggered externally — not by the agent.**
 
-**There is only one exit signal now.**
+The agent does not control when its incarnation ends. Bardo is imposed by the plane on its own schedule:
 
-The old distinction between `sleep` and `done` has been removed. The agent always signals `done`. **Bardo is smart** — it decides what to do with the transcript:
+- **Scheduler:** recurring bardo checks, budget exhaustion, scheduled tasks
+- **Experiment end:** `AureliaExperiment.__exit__` calls `trigger_bardo` explicitly
+- **God-lite / Janitor:** `aurelia agent bardo <name>` or direct runtime call
 
-- `_worth_archiving(entries)` — if the transcript contains nothing beyond the `incarnation_start` marker, the whole incarnation is discarded. No Akashic copy, no episodic summary, no semantic write. The agent woke up, saw nothing to do, said done, and dissolved into the background without a trace. This is cheap and clean — the Buddhist equivalent of a dreamless nap.
-- `_worth_consolidating(entries)` — if the transcript has no human messages, no memory flags, and fewer than three tool calls, the transcript is copied to Akashic but no Sonnet summarization runs. Purely mechanical heartbeats that did a quick check and exited still leave a record, but don't incur summarization cost.
+This is intentional. Agents that decide their own death tend to terminate early (after a single heartbeat) and lose the richer context that accumulates across multiple cycles in one incarnation. Death comes naturally and unexpectedly — the agent just lives and responds until the plane decides it's time to consolidate.
+
+**Bardo is smart** — it decides what to do with the transcript:
+
+- `_worth_archiving(entries)` — if the transcript contains nothing beyond the `incarnation_start` marker, the whole incarnation is discarded. No Akashic copy, no episodic summary, no semantic write.
+- `_worth_consolidating(entries)` — if the transcript has no human messages, no memory flags, and fewer than three tool calls, the transcript is copied to Akashic but no Sonnet summarization runs.
 - Otherwise, full bardo runs — Sonnet summary, memory-flag processing, unflagged-insight extraction, Akashic archive, karma cleanup.
 
 See `src/memory/bardo.py::_worth_archiving`, `_worth_consolidating`, `run_bardo`.
-
-This is the point at which infrastructure took over a decision that used to live in the agent. The agent no longer needs to introspect "was this worth remembering?" — it just signals completion and lets the plane decide.
-
-Everything else the agent wants to do is expressed through tool calls during the cycle, not through the next-action field.
 
 ### 3.4 Incarnation Policy
 
@@ -809,19 +809,24 @@ src/
         http.py     FastAPI server — thin wrapper over the runtime socket
         client.py   RuntimeClient — socket protocol client library
 
+    sandbox/        ← experiment infrastructure (not production)
+        sandbox.py  Sandbox pool: 5 fixed Linux users (sandbox-1..5) borrowed via
+                    fcntl flock. acquire_sandbox_agent() / release_sandbox_agent().
+                    Home is wiped on release. One-time setup: provision_sandbox_pool().
+                    Used by Alembic experiments instead of useradd/userdel per run.
+
 cli/                ← God-lite's control interface
-    aurelia            Primary CLI (rich + click). status, start, stop, message,
+    aurelia            Primary CLI (rich + click). status, start, stop, restart, message,
                        history, logs, agent {start,stop,status,spawn,bardo}, serve {http,discord}
     aurelia-admin.py   Legacy admin helpers (superseded by aurelia CLI)
     pretty_print.py    JSONL → readable markdown
 
 scripts/            ← system scripts
-    setup_agent.sh      Idempotent filesystem + user + FIFO setup (root or Docker)
-    run_runtime.sh      Wrapper that sources .env and starts the runtime daemon
-    run_daemons.sh      Legacy M2 multi-process launcher
-    scheduler_daemon.sh Legacy M2 scheduler launcher (now a thread inside runtime)
-    agent_daemon.sh     Legacy M2 agent daemon launcher
-    stop_daemons.sh     Legacy M2 shutdown
+    setup_agent.sh       Idempotent filesystem + user + FIFO setup (root or Docker)
+    run_runtime.sh       Wrapper that sources .env and starts the runtime daemon
+    smoke_sandbox.py     Smoke test for sandbox pool (acquire/release/lock exclusion)
+    fix_aurelia_admin.sh Remove agents from aurelia_admin group (one-time cleanup)
+    cleanup_ghosts.sh    Remove leftover ephemeral agent homes and config entries
 
 systemd/
     aurelia-runtime.service     Runtime daemon as aurelia:aurelia
@@ -839,7 +844,50 @@ Agent plane:  agent users              → /var/aurelia/queue/{agent} → agent 
 
 A transport is any process that translates outside-world intent into runtime calls. HTTP is a transport. Discord will be a transport. The `aurelia` CLI is a transport. They join the Linux group `transport_group` and connect to the Unix socket. **Agents (personal, cooking, finance, mayor, janitor) are deliberately NOT members of `transport_group`.** The socket is owned `aurelia:transport_group`, mode `660` in production, `666` in dev when running un-rooted.
 
-### 6.2 Full Directory Layout on Disk
+### 6.2 Process Model and Startup
+
+The runtime daemon runs as the `aurelia` Linux user, not as `zuzu` or root. This matters for filesystem isolation — `aurelia` can access agent homes (via `aurelia_admin` group membership) but has no access to `zuzu`'s personal files.
+
+**Startup sequence:**
+
+```
+zuzu runs: sudo aurelia start
+    └─ cli/aurelia (python, shebang: /opt/aurelia/venv/bin/python3)
+           └─ subprocess.Popen([
+                "sudo", "-u", "aurelia",
+                "--preserve-env=PYTHONPATH,ANTHROPIC_API_KEY,...",
+                "/opt/aurelia/venv/bin/python3",
+                "-m", "src.samsara.runtime_daemon"
+              ])
+                └─ sudo wrapper process (root, ephemeral — exits when child exits)
+                       └─ python3 runtime_daemon (aurelia, uid=999) ← the real process
+```
+
+The `sudo` wrapper persists as the parent process for the lifetime of the daemon — this is normal `sudo` behavior and not a concern. The CLI parses the real PID from the daemon's startup log line and stores it in `/var/aurelia/pids/runtime.pid`.
+
+**Why `--preserve-env` instead of a wrapper script:** `sudo` strips environment variables by default. The CLI injects `PYTHONPATH` and API keys into `os.environ` before spawning, then passes `--preserve-env` to forward them. This avoids a separate shell wrapper that would need to `source .env` (fragile across shells) while keeping the env injection explicit and auditable.
+
+**Tool execution as agent users:** When an agent calls `bash_exec`, the command runs as the agent's own Linux user via `sudo -u {agent_name} /bin/bash -c {command}`. This requires the sudoers entry at `/etc/sudoers.d/aurelia`:
+
+```
+aurelia ALL = (personal, cooking, finance, mayor, janitor) NOPASSWD: /bin/bash
+```
+
+The runtime (as `aurelia`) can impersonate any named agent for shell execution, but agents cannot impersonate each other or access `zuzu`'s environment.
+
+### 6.3 Permission Groups
+
+Three tiers of filesystem access:
+
+| Group | Members | Purpose |
+|---|---|---|
+| `agent_group` | all agent users | Grants access to shared resources tagged for agents |
+| `aurelia_admin` | `aurelia`, `zuzu` only | Full rwX access to all agent homes — runtime + God-lite |
+| per-agent user | just that agent | Owns their home dir, karma, akasha, room |
+
+Agent homes are `agent:aurelia_admin 750` — only the agent itself and `aurelia_admin` members can enter. **Agents are not members of `aurelia_admin`.** This is critical: if agents were in `aurelia_admin` they could read each other's `750`-permission homes. `agent_group` membership grants no cross-agent home access. `bash_exec` reinforces isolation by running as the agent user via `sudo -u {agent_name}`, so even if group permissions were misconfigured the agent would still be sandboxed to its own identity.
+
+### 6.4 Full Directory Layout on Disk
 
 ```
 /home/
@@ -905,7 +953,7 @@ A transport is any process that translates outside-world intent into runtime cal
     config.json                 ← aurelia:aurelia, agent tokens + janitor scheduler_token
 ```
 
-### 6.3 Two Queues, Two Purposes
+### 6.5 Two Queues, Two Purposes
 
 **The runtime socket** (`/var/aurelia/runtime.sock`) is how *transports* talk to the plane. It carries newline-delimited JSON, is authenticated by Linux group membership, and every request is logged with `SO_PEERCRED` (pid/uid/gid of the caller).
 
@@ -929,7 +977,7 @@ One writer, one reader → natural master/slave queue model
 No files to clean up → items consumed on read
 ```
 
-### 6.4 Runtime + HTTP as systemd Units
+### 6.6 Runtime + HTTP as systemd Units
 
 Two systemd units cover the core plane today:
 
@@ -969,7 +1017,7 @@ EnvironmentFile=/home/zuzu/Code/aurelia/.env
 
 Per-agent daemon units (`aurelia-{agent}.service`) exist for the FIFO-based privilege-separated deployment. In the current dev workflow, the runtime thread handles scheduled work in-process.
 
-### 6.5 Permission Model
+### 6.7 Permission Model
 
 ```
 Agent process (e.g., cooking Linux user):
@@ -1021,7 +1069,7 @@ God-lite:
     Episodic core promotions                → Traumatize and Enshrine (via Janitor today)
 ```
 
-### 6.6 Agent Discovery
+### 6.8 Agent Discovery
 
 `AgentRegistry` lives inside the runtime process and holds a thread-safe cache of `AgentConfig` instances.
 
@@ -1045,7 +1093,7 @@ class AgentRegistry:
 
 Registry reload is a runtime-level request (`{"type": "registry_reload"}`) exposed as the Janitor's `registry_reload` tool and the runtime's `registry.reload()` method. No separate admin endpoint.
 
-### 6.7 Configuration
+### 6.9 Configuration
 
 **Global defaults** (`/var/aurelia/config.json`) — written by `setup_agent.sh` with generated tokens:
 
