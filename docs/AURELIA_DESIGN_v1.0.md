@@ -1,14 +1,9 @@
 # Aurelia Design Document
 ### A Personal AI Civilization
 
-**Author:** Hazim (God-lite / Zuzu / God)
+**Author:** Hazim and his beloved Claude
 **Version:** 1.0 — First Living Revision
 **Status:** Reflects the system as actually built through Milestone 3.
-
-> This is a living document. It describes what exists. Sections that still hold
-> from v0.5 are preserved; sections where reality diverged from the original
-> design have been updated in place. Hazim and the agents both read this —
-> so the philosophy stays, the metaphors stay, and the precision stays.
 
 ---
 
@@ -16,7 +11,7 @@
 
 **Incarnation** — A single agent lifetime from wake hook to bardo completion. Has a unique friendly name, one hook, one context window, one Akashic record.
 
-**Cycle** — One message/response loop within an incarnation. Many cycles per incarnation. The cycle is the unit of computation. The incarnation is the unit of context and identity.
+**Cycle** — One message/response loop within an incarnation. Many cycles per incarnation. The cycle is the unit of computation. The incarnation is the unit of context and identity. Cycles are delineated by "done" requests.
 
 **Bardo** — The absorption phase between incarnations. A sleep-time subprocess that processes working memory into permanent records. Triggered on natural completion, timeout, or forced by agent invite. Bardo is also *smart* now — it decides whether a given incarnation is worth consolidating, worth archiving, or worth discarding entirely. See §3.3 and §4.8.
 
@@ -817,16 +812,9 @@ src/
 
 cli/                ← God-lite's control interface
     aurelia            Primary CLI (rich + click). status, start, stop, restart, message,
-                       history, logs, agent {start,stop,status,spawn,bardo}, serve {http,discord}
-    aurelia-admin.py   Legacy admin helpers (superseded by aurelia CLI)
+                       history, logs, agent {start,stop,status,spawn,bardo,create,destroy,reset},
+                       scheduler tick, serve {http,discord}
     pretty_print.py    JSONL → readable markdown
-
-scripts/            ← system scripts
-    setup_agent.sh       Idempotent filesystem + user + FIFO setup (root or Docker)
-    run_runtime.sh       Wrapper that sources .env and starts the runtime daemon
-    smoke_sandbox.py     Smoke test for sandbox pool (acquire/release/lock exclusion)
-    fix_aurelia_admin.sh Remove agents from aurelia_admin group (one-time cleanup)
-    cleanup_ghosts.sh    Remove leftover ephemeral agent homes and config entries
 
 systemd/
     aurelia-runtime.service     Runtime daemon as aurelia:aurelia
@@ -2055,23 +2043,24 @@ aurelia logs cooking
 ### 14.5 Adding a New Agent
 
 ```bash
-# Scaffold filesystem (idempotent). Requires root or Docker.
-sudo bash scripts/setup_agent.sh [agent_name]
+# Provision a new permanent agent (requires root)
+sudo aurelia agent create <name>
 
-# Or set up all five default agents + /var/aurelia + groups
-sudo bash scripts/setup_agent.sh
-
-# Reload registry through the Janitor
-aurelia message janitor "Please reload the agent registry."
+# With a specific model
+sudo aurelia agent create finance --model claude-opus-4-6
 ```
 
-`setup_agent.sh`:
-- Creates `transport_group` and puts `aurelia` + `zuzu` (dev) in it.
-- Creates `/var/aurelia/{shared,scheduler/*,dashboard/queue,queue,logs,pids,budgets}`.
-- Writes `/var/aurelia/config.json` with freshly generated per-agent tokens (if missing).
-- Writes each agent's `~/agent.json`, `~/dharma/constitution.md`, `~/identity/{character,contract,values}.md`.
-- Creates the FIFO at `/var/aurelia/queue/{agent}` with `aurelia:{agent} 620`.
-- Sets ownership + mode sensibly; falls back to world-writable with warnings if the users don't exist.
+Provisioning is handled by `src/samsara/provisioning.py::create_agent()`, called by the CLI. It is idempotent — safe to re-run against an agent that already has a home directory. What it does:
+
+- Creates the Linux user and adds them to `agent_group`
+- Creates the full filesystem structure (`karma/`, `akasha/`, `room/`, `identity/`, `dharma/`)
+- Loads the constitution from `dharma/{name}.md` if present, otherwise writes a minimal default
+- Creates the budget file at `/var/aurelia/budgets/{name}.json`
+- Creates the FIFO at `/var/aurelia/queue/{name}`
+- Writes the agent token to `/var/aurelia/config.json`
+- Sets ownership and permissions
+- Adds the agent to `/etc/sudoers.d/aurelia` so the runtime can execute bash as them
+- Reloads the runtime registry automatically if the runtime is up
 
 ### 14.6 Debugging
 

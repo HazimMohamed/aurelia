@@ -159,7 +159,8 @@ def load_agent_config(agent_name: str) -> AgentConfig:
 
     discord_channel = agent_data.get("discord_channel", agent_name)
 
-    # thinking_budget_tokens: explicit null in agent.json disables thinking
+    # thinking_budget_tokens: non-null enables adaptive thinking, null disables it.
+    # The numeric value is ignored — adaptive mode self-regulates.
     thinking_key = "thinking_budget_tokens"
     if thinking_key in agent_data:
         thinking_budget = agent_data[thinking_key]  # None disables it

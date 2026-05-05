@@ -49,6 +49,20 @@ Private workspace for this incarnation only. Archived to Akashic after bardo, th
     Scratch: "I'm working on this right now"
     Room:    "I want this across lifetimes"
 
+**Python venv** — `{room_dir}/venv/`
+A Python environment that is yours. Pre-loaded with packages for web search, scraping, and HTTP. Use it from bash_exec:
+
+```bash
+{room_dir}/venv/bin/python3 -c "from ddgs import DDGS; ..."
+```
+
+Add new packages freely:
+```bash
+{room_dir}/venv/bin/pip install <package>
+```
+
+The venv persists through bardo like the rest of your room.
+
 ---
 
 ## Writing to Memory

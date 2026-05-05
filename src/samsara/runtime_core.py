@@ -494,7 +494,10 @@ def build_hook_prompt(
 def get_budget_info(agent: str) -> dict:
     """Return raw budget dict for an agent (status, tokens_used, etc.)."""
     from ..memory.budget import load_budget
-    return load_budget(agent)
+    config = _registry.get(agent)
+    if not config:
+        return {}
+    return load_budget(config.home)
 
 
 def get_registry() -> AgentRegistry:

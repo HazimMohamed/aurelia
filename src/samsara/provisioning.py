@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,8 +33,10 @@ from .config import (
     AgentConfig,
     MODEL_SONNET,
 )
+from ..memory.budget import _get_week_start
 
 _DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
+_REPO_ROOT = Path(__file__).parent.parent.parent
 
 
 # ── Seed karma ─────────────────────────────────────────────────────────────────
@@ -194,27 +197,49 @@ def _inject_seed_karma(home: Path, agent_name: str, seed: SeedKarma) -> None:
         (home / "room" / filename).write_text(content, encoding="utf-8")
 
 
+# ── Agent venv ────────────────────────────────────────────────────────────────
+
+
+def _setup_agent_venv(home: Path, agent_name: str) -> None:
+    venv_path = home / "room" / "venv"
+    if venv_path.exists():
+        return
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv_path)],
+        check=True,
+        capture_output=True,
+    )
+    pip = venv_path / "bin" / "pip"
+    base_req = _REPO_ROOT / "requirements" / "agent-base.txt"
+    if base_req.exists():
+        subprocess.run(
+            [str(pip), "install", "-r", str(base_req), "--quiet"],
+            check=True,
+            capture_output=True,
+        )
+    agent_req = _REPO_ROOT / "requirements" / f"agent-{agent_name}.txt"
+    if agent_req.exists():
+        subprocess.run(
+            [str(pip), "install", "-r", str(agent_req), "--quiet"],
+            check=True,
+            capture_output=True,
+        )
+
+
 # ── Runtime support files ──────────────────────────────────────────────────────
 
 
-def _create_budget_file(agent_name: str) -> None:
-    budgets_dir = Path("/var/aurelia/budgets")
-    budgets_dir.mkdir(parents=True, exist_ok=True)
-    path = budgets_dir / f"{agent_name}.json"
+def _create_budget_file(home: Path) -> None:
+    from ..memory.budget import DEFAULT_HEARTBEAT_WEEKLY_BUDGET, save_budget
+    path = home / "budget.json"
     if not path.exists():
-        path.write_text(
-            json.dumps(
-                {
-                    "agent": agent_name,
-                    "status": "active",
-                    "tokens_used": 0,
-                    "weekly_budget": 300_000,
-                    "week_start": datetime.now(timezone.utc).isoformat(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        save_budget(home, {
+            "week_start": _get_week_start(),
+            "tokens_used": 0,
+            "status": "active",
+            "heartbeat_weekly_budget": DEFAULT_HEARTBEAT_WEEKLY_BUDGET,
+            "heartbeat_cycles": {},
+        })
 
 
 def _create_fifo(agent_name: str) -> None:
@@ -347,11 +372,12 @@ def _provision(
     _create_linux_user(name)
     home.mkdir(parents=True, exist_ok=True)
     _setup_filesystem(home, name, display_name, constitution, model, overwrite=overwrite)
+    _setup_agent_venv(home, name)
 
     if seed_karma:
         _inject_seed_karma(home, name, seed_karma)
 
-    _create_budget_file(name)
+    _create_budget_file(home)
     _create_fifo(name)
     _update_config(name, token)
     _chown(name, home)
@@ -455,10 +481,6 @@ def destroy_ephemeral_agent(agent: EphemeralAgent) -> None:
     fifo = Path("/var/aurelia/queue") / agent.name
     if fifo.exists():
         fifo.unlink()
-
-    budget = Path("/var/aurelia/budgets") / f"{agent.name}.json"
-    if budget.exists():
-        budget.unlink()
 
     _remove_from_config(agent.name)
     _remove_from_sudoers(agent.name)

@@ -29,12 +29,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+_SONNET_BLENDED_COST_PER_M = 6.00  # conservative blended estimate (input $3 + output $15, input-heavy)
+
 _LAB_ROOT = Path(__file__).parent.parent  # aurelia/lab/
 _AURELIA_ROOT = _LAB_ROOT.parent          # aurelia/
 _ALEMBIC_ROOT = _LAB_ROOT
 if str(_AURELIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_AURELIA_ROOT))
 
+from src.samsara.config import AGENT_HOME_BASE
 from src.samsara.provisioning import SeedKarma
 from src.sandbox.sandbox import SandboxAgent, acquire_sandbox_agent, release_sandbox_agent
 from src.agent.transcript import read_entries
@@ -67,6 +70,8 @@ class AureliaExperiment:
         self._start_time: datetime | None = None
         self._results: list[dict] = []
         self.cold_storage_dir: Path | None = None
+        self._tokens_before: int = 0
+        self.tokens_used: int = 0
 
     def __enter__(self) -> "AureliaExperiment":
         self._start_time = datetime.now(timezone.utc)
@@ -79,6 +84,7 @@ class AureliaExperiment:
             print(f"          transplanting karma from {self.chain_from.parent.name}...")
             self._transplant_karma(self.chain_from)
 
+        self._tokens_before = self._read_budget_tokens(self._agent.name)
         self._client.registry_reload()
 
         self._inc = self._client.spawn(self._agent.name)
@@ -95,12 +101,27 @@ class AureliaExperiment:
         try:
             print("\n[ bardo ] Triggering bardo...")
             self._client.trigger_bardo(self._agent.name)
+            self.tokens_used = self._read_budget_tokens(self._agent.name) - self._tokens_before
             self._save_cold_storage()
         finally:
             print("\n[ teardown ] Releasing sandbox agent...")
             release_sandbox_agent(self._agent)
             self._client.registry_reload()
             print(f"             {self._agent.name} released")
+
+    # ── Budget helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _read_budget_tokens(agent_name: str) -> int:
+        path = AGENT_HOME_BASE / agent_name / "budget.json"
+        try:
+            return json.loads(path.read_text()).get("tokens_used", 0)
+        except (OSError, json.JSONDecodeError):
+            return 0
+
+    @staticmethod
+    def estimated_cost_usd(tokens: int) -> float:
+        return round(tokens * _SONNET_BLENDED_COST_PER_M / 1_000_000, 4)
 
     # ── Dispatch methods ───────────────────────────────────────────────────────
 
@@ -204,6 +225,8 @@ class AureliaExperiment:
             "chained_from": str(self.chain_from) if self.chain_from else None,
             "cached_context": "context/system_prompt.md",
             "cycles": len(self._results),
+            "tokens_used": self.tokens_used,
+            "estimated_cost_usd": self.estimated_cost_usd(self.tokens_used),
         }
         (run_dir / "experiment.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 

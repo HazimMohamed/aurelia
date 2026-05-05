@@ -102,6 +102,8 @@ def heartbeat_precheck(agent: AgentConfig) -> bool:
 
 def format_heartbeat_prompt(agent: AgentConfig) -> str:
     """Build the heartbeat prompt text for the agent."""
+    from ..memory.budget import get_heartbeat_history, get_heartbeat_tokens_used, load_budget
+
     unread = count_bulletin_unread(agent)
     scheduled = count_scheduled_now(agent)
 
@@ -118,7 +120,26 @@ def format_heartbeat_prompt(agent: AgentConfig) -> str:
     if unread == 0 and scheduled == 0:
         parts.append("- No specific items pending. Use this time as you see fit.")
 
+    # Budget block
+    try:
+        budget = load_budget(agent.home)
+        heartbeat_limit = budget.get("heartbeat_weekly_budget", 100_000)
+        heartbeat_used = get_heartbeat_tokens_used(agent.home)
+        heartbeat_remaining = max(0, heartbeat_limit - heartbeat_used)
+        history = get_heartbeat_history(agent.home)
+
+        parts += ["", "## Your Free-Time Budget"]
+        parts.append(f"{heartbeat_remaining:,} / {heartbeat_limit:,} tokens remaining this week.")
+        if history:
+            history_str = " → ".join(f"{t:,}" for t in history)
+            parts.append(f"Recent heartbeat usage (tokens per cycle): {history_str}")
+        parts.append("When your tokens run out you won't be able to explore freely. Noop if you'd rather save them for later.")
+    except Exception:
+        pass
+
     parts += [
+        "",
+        "If you have nothing to say or do right now, that is completely fine. End immediately with the done signal — no output required.",
         "",
         'When you are done, end with: {"next": {"type": "done"}}',
     ]

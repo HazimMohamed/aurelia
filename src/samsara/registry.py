@@ -65,7 +65,7 @@ class AgentRegistry:
         # Check budget status first
         try:
             from ..memory.budget import load_budget
-            budget_data = load_budget(agent_name)
+            budget_data = load_budget(config.home)
             if budget_data.get("status") == "budget_paused":
                 last_active = _get_last_active_from_akasha(config)
                 return {

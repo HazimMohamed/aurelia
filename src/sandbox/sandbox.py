@@ -100,6 +100,7 @@ def _reset_sandbox_home(
     _setup_filesystem(home, name, base_agent.capitalize(), constitution, model, overwrite=True)
     if seed_karma:
         _inject_seed_karma(home, name, seed_karma)
+    _create_budget_file(home)
     _chown(name, home)
 
 
@@ -127,7 +128,6 @@ def acquire_sandbox_agent(
 
     resolved_constitution = load_constitution(base_agent, constitution)
     _reset_sandbox_home(name, base_agent, resolved_constitution, model, seed_karma)
-    _create_budget_file(name)
     _create_fifo(name)
     _update_config(name, token)
 
@@ -156,10 +156,6 @@ def release_sandbox_agent(agent: SandboxAgent) -> None:
     fifo = Path("/var/aurelia/queue") / agent.name
     if fifo.exists():
         fifo.unlink(missing_ok=True)
-
-    budget = Path("/var/aurelia/budgets") / f"{agent.name}.json"
-    if budget.exists():
-        budget.unlink(missing_ok=True)
 
     home = AGENT_HOME_BASE / agent.name
     if home.exists():

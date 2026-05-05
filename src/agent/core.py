@@ -116,11 +116,13 @@ def run_agent_cycle(
     if total_tokens > 0:
         try:
             from ..memory.budget import check_and_apply_budget
+            incarnation_name = incarnation_state.get("name", "unknown")
             check_and_apply_budget(
                 config=config,
                 tokens_used=total_tokens,
-                incarnation_name=incarnation_state.get("name", ""),
+                incarnation_name=incarnation_name,
                 task_in_progress=human_content[:100],
+                heartbeat_cycle_key=f"{incarnation_name}-{cycle}" if hook_type == HookType.HEARTBEAT else None,
             )
         except Exception as e:
             print(f"[core] Budget tracking error: {e}")
@@ -170,35 +172,24 @@ def _run_with_tools(
         create_kwargs["tools"] = tools
     use_thinking = bool(config.thinking_budget_tokens)
     if use_thinking:
-        create_kwargs["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": config.thinking_budget_tokens,
-        }
+        create_kwargs["thinking"] = {"type": "adaptive"}
         create_kwargs["temperature"] = 1
-        create_kwargs["max_tokens"] = config.thinking_budget_tokens + 8192
+        create_kwargs["max_tokens"] = 16000
 
     extra_ctx = getattr(tool_registry, "_ctx_extras", {}) if tool_registry else {}
 
     while tool_cycle < MAX_TOOL_CYCLES:
         create_kwargs["messages"] = messages
 
-        if use_thinking:
-            # thinking is not supported by stream() — use blocking create()
-            final = client.messages.create(**create_kwargs)
-            if stream_callback:
-                for block in final.content:
-                    if block.type == "thinking":
-                        stream_callback({"type": "thinking_delta", "content": block.thinking})
-                    elif block.type == "text":
-                        stream_callback({"type": "delta", "content": block.text})
-        else:
-            with client.messages.stream(**create_kwargs) as stream:
-                for event in stream:
-                    if event.type == "content_block_delta" and stream_callback:
-                        delta = event.delta
-                        if delta.type == "text_delta":
-                            stream_callback({"type": "delta", "content": delta.text})
-                final = stream.get_final_message()
+        with client.messages.stream(**create_kwargs) as stream:
+            for event in stream:
+                if event.type == "content_block_delta" and stream_callback:
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        stream_callback({"type": "delta", "content": delta.text})
+                    elif delta.type == "thinking_delta":
+                        stream_callback({"type": "thinking_delta", "content": delta.thinking})
+            final = stream.get_final_message()
 
         if hasattr(final, "usage") and final.usage:
             total_tokens += (

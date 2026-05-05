@@ -2,10 +2,10 @@
 """pretty_print.py — Convert Aurelia JSONL transcript/memory files to readable markdown.
 
 Usage:
-    python3 scripts/pretty_print.py /home/personal/karma/episodic/extended/personal-quiet-moon-8.jsonl
-    python3 scripts/pretty_print.py /home/personal/akasha/personal-quiet-moon-8/personal-quiet-moon-8-transcript.jsonl
-    cat some.jsonl | python3 scripts/pretty_print.py -
-    python3 scripts/pretty_print.py /home/personal/karma/semantic/core.jsonl
+    python3 cli/pretty_print.py /home/personal/karma/episodic/extended/personal-quiet-moon-8.jsonl
+    python3 cli/pretty_print.py /home/personal/akasha/personal-quiet-moon-8/personal-quiet-moon-8-transcript.jsonl
+    cat some.jsonl | python3 cli/pretty_print.py -
+    python3 cli/pretty_print.py /home/personal/karma/semantic/core.jsonl
 """
 
 from __future__ import annotations
