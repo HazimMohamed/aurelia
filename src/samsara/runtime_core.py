@@ -271,7 +271,7 @@ def list_incarnations(agent: str) -> list[IncarnationSummary]:
 
 def list_agents() -> list[AgentSummary]:
     """List all registered agents and their current status."""
-    from ..memory.budget import get_budget_remaining, load_budget
+    from ..agent.budget import get_budget_remaining, load_budget
 
     summaries = []
     for agent_name in _registry.all_agents():
@@ -409,7 +409,7 @@ def process_scheduled_item(item: dict) -> dict:
         return {"status": "ok", "triggered": triggered}
 
     if item_type == "budget_reset":
-        from ..memory.budget import reset_all_budgets
+        from ..agent.budget import reset_all_budgets
         reset_all_budgets()
         return {"status": "ok", "action": "budget_reset"}
 
@@ -493,11 +493,11 @@ def build_hook_prompt(
 
 def get_budget_info(agent: str) -> dict:
     """Return raw budget dict for an agent (status, tokens_used, etc.)."""
-    from ..memory.budget import load_budget
+    from ..agent.budget import load_budget
     config = _registry.get(agent)
     if not config:
         return {}
-    return load_budget(config.home)
+    return load_budget(config.data_dir)
 
 
 def get_registry() -> AgentRegistry:

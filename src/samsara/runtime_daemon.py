@@ -32,6 +32,82 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from . import runtime_core as runtime
 from ..agent.hooks import HookType
 
+# ── Manas routing ──────────────────────────────────────────────────────────────
+
+_PER_AGENT_TYPES = frozenset({
+    "spawn", "dispatch", "get_history", "list_incarnations",
+    "get_active", "get_budget_info", "trigger_bardo", "internal_process",
+})
+
+
+def _is_manas_live(config: Any) -> bool:
+    """Return True if this agent's Manas socket exists and responds to a ping."""
+    if not config.manas_socket.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(str(config.manas_socket))
+            s.sendall(json.dumps({"type": "ping"}).encode() + b"\n")
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(256)
+                if not chunk:
+                    return False
+                buf += chunk
+        return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def _route_to_manas(config: Any, request: dict) -> Any:
+    """Forward a non-streaming request to Manas and return the result data."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(300.0)
+        s.connect(str(config.manas_socket))
+        s.sendall(json.dumps(request).encode() + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise RuntimeError("Manas connection closed unexpectedly")
+            buf += chunk
+        line, _ = buf.split(b"\n", 1)
+        resp = json.loads(line.decode())
+        if resp.get("status") == "error":
+            raise RuntimeError(resp.get("message", "Manas returned error"))
+        return resp.get("data")
+
+
+def _route_to_manas_stream(config: Any, request: dict, send_frame: Any) -> Any:
+    """Forward a streaming dispatch to Manas.
+
+    Calls send_frame for each intermediate frame. Returns the result dict from
+    Manas's done frame — the caller is responsible for sending its own done frame
+    with the correct request id.
+    """
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(10.0)
+        s.connect(str(config.manas_socket))
+        s.sendall(json.dumps(request).encode() + b"\n")
+        s.settimeout(None)
+        buf = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise RuntimeError("Manas stream ended without done frame")
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                if not line:
+                    continue
+                frame = json.loads(line.decode())
+                if frame.get("type") == "done":
+                    if frame.get("status") == "error":
+                        raise RuntimeError(frame.get("message", "Manas stream error"))
+                    return frame.get("data")
+                send_frame(frame)
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 SOCKET_PATH = Path("/var/aurelia/runtime.sock")
@@ -94,6 +170,14 @@ def _now_iso() -> str:
 def _dispatch(request: dict[str, Any]) -> Any:
     """Route a parsed request dict to the correct runtime function and return result."""
     req_type = request.get("type")
+    agent_name = request.get("agent")
+
+    if req_type in _PER_AGENT_TYPES and agent_name:
+        registry = runtime.get_registry()
+        config = registry.get(agent_name)
+        if config and _is_manas_live(config):
+            return _route_to_manas(config, request)
+
 
     match req_type:
         case "spawn":
@@ -245,13 +329,18 @@ def _handle_connection(conn: socket.socket) -> None:
 
                 t_start = time.monotonic()
                 try:
-                    result = runtime.dispatch(
-                        agent=request["agent"],
-                        incarnation=request["incarnation"],
-                        hook=HookType(request["hook"]),
-                        payload=request.get("payload", {}),
-                        stream_callback=send_frame,
-                    )
+                    registry = runtime.get_registry()
+                    _config = registry.get(request["agent"])
+                    if _config and _is_manas_live(_config):
+                        result = _route_to_manas_stream(_config, request, send_frame)
+                    else:
+                        result = runtime.dispatch(
+                            agent=request["agent"],
+                            incarnation=request["incarnation"],
+                            hook=HookType(request["hook"]),
+                            payload=request.get("payload", {}),
+                            stream_callback=send_frame,
+                        )
                     duration_ms = int((time.monotonic() - t_start) * 1000)
                     send_frame({
                         "type": "done",

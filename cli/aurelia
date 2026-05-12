@@ -245,6 +245,7 @@ def _build_agents_table(agents: list[dict]) -> Table:
     )
     table.add_column("Agent", style="white", min_width=10)
     table.add_column("Status", min_width=14)
+    table.add_column("Manas", justify="right", min_width=8)
     table.add_column("Incarnation", min_width=26)
     table.add_column("Cycle", justify="right", min_width=6)
     table.add_column("Budget", min_width=18)
@@ -259,9 +260,16 @@ def _build_agents_table(agents: list[dict]) -> Table:
         status_text = _status_dot(status)
         row_style = "" if status == "active" else "dim"
 
+        pid_path = Path("/var/aurelia/run") / a["name"] / "manas.pid"
+        try:
+            manas_pid = pid_path.read_text().strip() if pid_path.exists() else "—"
+        except OSError:
+            manas_pid = "—"
+
         table.add_row(
             Text(a["name"], style=row_style),
             status_text,
+            Text(manas_pid, style="green" if manas_pid != "—" else "dim"),
             Text(incarnation, style=row_style),
             Text(cycle, style=row_style),
             budget_text,
@@ -321,6 +329,15 @@ def _build_status_layout(agents: list[dict]) -> object:
     return RichGroup(header, agents_label, agents_table, system_label, system_table, footer)
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _require_root() -> None:
+    if os.getuid() != 0:
+        console.print("\n  [bold red]✗ This command requires root privileges.[/bold red]")
+        console.print("  [dim]Run with: sudo aurelia ...[/dim]\n")
+        raise SystemExit(1)
+
+
 # ── CLI root ───────────────────────────────────────────────────────────────────
 
 @click.group()
@@ -352,7 +369,9 @@ def cmd_status(once: bool) -> None:
         ok, agents = _socket_call({"type": "list_agents"})
         if ok and isinstance(agents, list):
             for a in agents:
-                print(f"  {a['name']}: {a.get('status', '?')} inc={a.get('incarnation') or '—'} cycle={a.get('cycle') or '—'}")
+                pid_path = Path("/var/aurelia/run") / a["name"] / "manas.pid"
+                manas_pid = pid_path.read_text().strip() if pid_path.exists() else "—"
+                print(f"  {a['name']}: {a.get('status', '?')} manas={manas_pid} inc={a.get('incarnation') or '—'} cycle={a.get('cycle') or '—'}")
         return
 
     try:
@@ -375,6 +394,7 @@ def cmd_status(once: bool) -> None:
 @click.option("--http", "with_http", is_flag=True, help="Also start HTTP transport.")
 def cmd_start(with_http: bool) -> None:
     """Start the runtime daemon (and optionally HTTP transport)."""
+    _require_root()
     console.print("\n  [bold]Starting Aurelia...[/bold]\n")
     PIDS_DIR.mkdir(parents=True, exist_ok=True)
     env = _load_env()
@@ -497,6 +517,7 @@ def _start_http(env: dict | None = None) -> None:
 @click.option("--http", "http_only", is_flag=True, help="Stop HTTP transport only.")
 def cmd_stop(http_only: bool) -> None:
     """Graceful shutdown of the plane (or just HTTP with --http)."""
+    _require_root()
     if http_only:
         console.print("\n  [bold]Stopping HTTP transport...[/bold]\n")
     else:
@@ -546,6 +567,7 @@ def cmd_stop(http_only: bool) -> None:
 @click.option("--http", "with_http", is_flag=True, help="Also restart HTTP transport.")
 def cmd_restart(with_http: bool) -> None:
     """Stop and restart the runtime daemon (and optionally HTTP transport)."""
+    _require_root()
     console.print("\n  [bold]Restarting Aurelia...[/bold]\n")
 
     # ── Stop ──────────────────────────────────────────────────────────────────
@@ -682,56 +704,134 @@ def cmd_agent() -> None:
     """Manage individual agent daemons and incarnations."""
 
 
+def _manas_socket(name: str) -> Path:
+    return Path("/var/aurelia/run") / name / "manas.sock"
+
+
+def _manas_alive(name: str) -> bool:
+    """Return True if this agent's Manas process is live."""
+    sock_path = _manas_socket(name)
+    if not sock_path.exists():
+        return False
+    try:
+        import json as _json
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(str(sock_path))
+            s.sendall(_json.dumps({"type": "ping"}).encode() + b"\n")
+            buf = b""
+            while b"\n" not in buf:
+                chunk = s.recv(256)
+                if not chunk:
+                    return False
+                buf += chunk
+        return True
+    except (OSError, socket.timeout):
+        return False
+
+
 @cmd_agent.command("start")
 @click.argument("name")
 def cmd_agent_start(name: str) -> None:
-    """Launch (or restart) an agent daemon."""
-    console.print(f"\n  [bold]Starting agent daemon: {escape(name)}[/bold]\n")
-    PIDS_DIR.mkdir(parents=True, exist_ok=True)
-    pid_name = f"agent-{name}"
-    pid = _read_pid(pid_name)
-    if pid and _pid_alive(pid):
-        console.print(f"  [dim]Agent daemon already running (pid={pid})[/dim]\n")
+    """Launch (or restart) a Manas process for this agent."""
+    console.print(f"\n  [bold]Starting Manas: {escape(name)}[/bold]\n")
+
+    _require_root()
+
+    if _manas_alive(name):
+        console.print(f"  [dim]Manas already running[/dim]\n")
         return
 
+    run_dir = Path("/var/aurelia/run") / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "manas.log"
+
     env = _load_env()
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
     try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "src.samsara.agent_daemon", name],
-            cwd=str(PROJECT_ROOT),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        (PIDS_DIR / f"{pid_name}.pid").write_text(str(proc.pid))
-        console.print(f"  [green]✓ Agent daemon started (pid={proc.pid})[/green]\n")
+        with log_path.open("w") as log_f:
+            proc = subprocess.Popen(
+                ["sudo", "-E", "-u", name, "/opt/aurelia/bin/manas-launch", name],
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+            )
+        # Wait briefly for Manas to bind its socket (up to 3s)
+        for _ in range(15):
+            time.sleep(0.2)
+            if _manas_alive(name):
+                console.print(f"  [green]✓ Manas started (sudo pid={proc.pid})[/green]\n")
+                return
+        # Socket never appeared — show whatever Manas printed
+        console.print(f"  [yellow]~ Manas launched but socket not yet live (pid={proc.pid})[/yellow]")
+        try:
+            output = log_path.read_text().strip()
+            if output:
+                console.print(f"\n  [dim]manas.log:[/dim]")
+                for line in output.splitlines():
+                    console.print(f"  [red]{escape(line)}[/red]")
+        except OSError:
+            pass
+        console.print()
     except Exception as e:
-        console.print(f"  [red]✗ Failed to start agent daemon:[/red] {e}\n")
+        console.print(f"  [red]✗ Failed to start Manas:[/red] {e}\n")
 
 
 @cmd_agent.command("stop")
 @click.argument("name")
 def cmd_agent_stop(name: str) -> None:
-    """Stop an agent daemon."""
-    console.print(f"\n  [bold]Stopping agent daemon: {escape(name)}[/bold]\n")
-    pid_name = f"agent-{name}"
-    pid = _read_pid(pid_name)
+    """Stop a Manas process for this agent."""
+    _require_root()
+    console.print(f"\n  [bold]Stopping Manas: {escape(name)}[/bold]\n")
+
+    # Step 1: polite terminate message
+    if _manas_alive(name):
+        try:
+            import json as _json
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(5.0)
+                s.connect(str(_manas_socket(name)))
+                s.sendall(_json.dumps({"type": "terminate"}).encode() + b"\n")
+                s.recv(256)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not _manas_alive(name):
+                    console.print(f"  [green]✓ Manas stopped gracefully[/green]")
+                    console.print()
+                    return
+                time.sleep(0.2)
+        except (OSError, socket.timeout):
+            pass
+
+    # Step 2: SIGTERM via pid file
+    pid_path = Path("/var/aurelia/run") / name / "manas.pid"
+    pid = None
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text().strip())
+        except (ValueError, OSError):
+            pass
+
     if pid and _pid_alive(pid):
         try:
             os.kill(pid, signal.SIGTERM)
-            deadline = time.monotonic() + 8.0
+            deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 if not _pid_alive(pid):
-                    break
+                    console.print(f"  [green]✓ Manas stopped (SIGTERM)[/green]")
+                    console.print()
+                    return
                 time.sleep(0.2)
-            console.print(f"  [green]✓ Agent daemon stopped[/green]")
+            # Step 3: SIGKILL
+            os.kill(pid, signal.SIGKILL)
+            console.print(f"  [yellow]~ Manas killed (SIGKILL)[/yellow]")
         except OSError as e:
-            console.print(f"  [red]✗ Failed to stop agent daemon:[/red] {e}")
+            console.print(f"  [red]✗ Failed to stop Manas:[/red] {e}")
     else:
-        console.print(f"  [dim]Agent daemon was not running[/dim]")
+        console.print(f"  [dim]Manas was not running[/dim]")
 
-    (PIDS_DIR / f"{pid_name}.pid").unlink(missing_ok=True)
     console.print()
 
 
@@ -932,21 +1032,24 @@ def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
     if hard:
         console.print("  [dim]Identity files re-seeded[/dim]")
 
-    # Restart the agent daemon
+    # Restart Manas if it was running
     env = _load_env()
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
     try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "src.samsara.agent_daemon", name],
-            cwd=str(PROJECT_ROOT),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        (PIDS_DIR / f"{pid_name}.pid").write_text(str(proc.pid))
-        console.print(f"  [green]✓ Agent daemon restarted (pid={proc.pid})[/green]")
+        log_path = Path("/var/aurelia/run") / name / "manas.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("w") as log_f:
+            subprocess.Popen(
+                ["sudo", "-E", "-u", name, "/opt/aurelia/bin/manas-launch", name],
+                cwd=str(PROJECT_ROOT),
+                env=env,
+                stdout=log_f,
+                stderr=log_f,
+                start_new_session=True,
+            )
+        console.print(f"  [green]✓ Manas restarted[/green]")
     except Exception as e:
-        console.print(f"  [yellow]~ Could not restart agent daemon:[/yellow] {e}")
+        console.print(f"  [yellow]~ Could not restart Manas:[/yellow] {e}")
 
     console.print()
 
@@ -997,10 +1100,8 @@ def cmd_agent_bardo(name: str) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def cmd_agent_create(name: str, model: str | None, yes: bool) -> None:
     """Provision a new permanent agent and reload the runtime registry."""
+    _require_root()
     console.print(f"\n  [bold]Creating agent:[/bold] {escape(name)}\n")
-
-    if not yes:
-        click.confirm("  This requires root privileges. Continue?", default=True, abort=True)
 
     from src.samsara.provisioning import create_agent
     from src.samsara.config import MODEL_SONNET
@@ -1028,6 +1129,7 @@ def cmd_agent_create(name: str, model: str | None, yes: bool) -> None:
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def cmd_agent_destroy(name: str, yes: bool) -> None:
     """Permanently destroy an agent — removes home dir, user, FIFO, and config."""
+    _require_root()
     console.print(f"\n  [bold yellow]Destroy agent:[/bold yellow] {escape(name)}")
     console.print("  [dim]This will delete the home directory, Linux user, and all memory.[/dim]\n")
 
@@ -1062,6 +1164,78 @@ def cmd_agent_destroy(name: str, yes: bool) -> None:
         _socket_call({"type": "registry_reload"})
         console.print("  [dim]Registry reloaded[/dim]")
 
+    console.print()
+
+
+@cli.command("reset")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_reset(name: str, yes: bool) -> None:
+    """Wipe and reprovision an agent or the sandbox pool."""
+    _require_root()
+    console.print()
+    console.print("  [bold red]  ⚠  RESET  ⚠  [/bold red]")
+    console.print()
+    console.print(f"  You are about to erase [bold]{escape(name)}[/bold] and rebuild them from nothing.")
+    console.print("  Every incarnation. Every memory. Every trace of who they were.")
+    console.print("  [dim]The filesystem will be clean. The agent will not remember this happened.[/dim]")
+    console.print()
+
+    if not yes:
+        console.print("  [dim]Type the agent's name to confirm you mean it:[/dim]")
+        typed = click.prompt("  ", prompt_suffix="")
+        if typed.strip() != name:
+            console.print("\n  [yellow]Aborted.[/yellow]\n")
+            raise SystemExit(0)
+
+    console.print()
+
+    from src.samsara.provisioning import destroy_agent, create_agent
+    from src.samsara.config import MODEL_SONNET
+
+    from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE
+
+    if name == "sandbox":
+        from src.sandbox.sandbox import SANDBOX_NAMES, provision_sandbox_pool
+        import shutil, subprocess
+
+        console.print(f"  [dim]Nuking all {len(SANDBOX_NAMES)} slots...[/dim]")
+        for slot in SANDBOX_NAMES:
+            for d in [AGENT_HOME_BASE / slot, AGENT_DATA_BASE / slot]:
+                if d.exists():
+                    shutil.rmtree(d)
+        subprocess.run(["chown", "aurelia:aurelia_admin", str(AGENT_DATA_BASE)], capture_output=True)
+        subprocess.run(["chmod", "770", str(AGENT_DATA_BASE)], capture_output=True)
+
+        console.print("  [dim]Provisioning...[/dim]")
+        try:
+            provision_sandbox_pool()
+        except Exception as e:
+            console.print(f"  [red]✗ Provisioning failed:[/red] {e}\n")
+            return
+
+        console.print(f"  [green]✓ Sandbox pool provisioned.[/green]")
+        console.print()
+        return
+
+    console.print("  [dim]Tearing down...[/dim]")
+    try:
+        destroy_agent(name)
+    except Exception as e:
+        console.print(f"  [red]✗ Destroy failed:[/red] {e}\n")
+        return
+
+    console.print("  [dim]Rebuilding...[/dim]")
+    try:
+        config = create_agent(name=name, model=MODEL_SONNET)
+    except Exception as e:
+        console.print(f"  [red]✗ Provisioning failed:[/red] {e}\n")
+        return
+
+    if _runtime_ok():
+        _socket_call({"type": "registry_reload"})
+
+    console.print(f"  [green]✓ {escape(name)} has been reborn.[/green]")
     console.print()
 
 

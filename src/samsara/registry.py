@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import AgentConfig, load_agent_config, list_known_agents
+from .config import AGENT_DATA_BASE, AgentConfig, load_agent_config, list_known_agents
 from ..agent.incarnation import get_active_incarnation
 from ..agent.transcript import read_entries
 
@@ -42,7 +42,7 @@ class AgentRegistry:
             if agent_name in self._configs:
                 return self._configs[agent_name]
         # Try loading fresh from filesystem
-        agent_json = Path("/home") / agent_name / "agent.json"
+        agent_json = AGENT_DATA_BASE / agent_name / "agent.json"
         if agent_json.exists():
             config = load_agent_config(agent_name)
             with self._lock:
@@ -64,8 +64,8 @@ class AgentRegistry:
 
         # Check budget status first
         try:
-            from ..memory.budget import load_budget
-            budget_data = load_budget(config.home)
+            from ..agent.budget import load_budget
+            budget_data = load_budget(config.data_dir)
             if budget_data.get("status") == "budget_paused":
                 last_active = _get_last_active_from_akasha(config)
                 return {

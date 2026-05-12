@@ -29,11 +29,13 @@ from pathlib import Path
 
 from .config import (
     AGENT_HOME_BASE,
+    AGENT_DATA_BASE,
+    AGENT_RUN_BASE,
     GLOBAL_CONFIG_PATH,
     AgentConfig,
     MODEL_SONNET,
 )
-from ..memory.budget import _get_week_start
+from ..agent.budget import _get_week_start
 
 _DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
 _REPO_ROOT = Path(__file__).parent.parent.parent
@@ -98,24 +100,27 @@ def load_constitution(agent_name: str, custom: str | None = None) -> str:
 
 def _setup_filesystem(
     home: Path,
+    data_dir: Path,
     agent_name: str,
     display_name: str,
     constitution: str,
     model: str,
     overwrite: bool = False,
 ) -> None:
-    for d in [
-        "identity",
-        "karma/episodic/core",
-        "karma/episodic/extended",
-        "karma/semantic/extended",
-        "akasha",
-        "room",
-        "dharma",
-    ]:
+    # Agent-owned workspace
+    for d in ["identity", "room", "dharma"]:
         (home / d).mkdir(parents=True, exist_ok=True)
 
-    semantic_core = home / "karma/semantic/core.jsonl"
+    # Samsara-managed data
+    for d in [
+        "memory/episodic/core",
+        "memory/episodic/extended",
+        "memory/semantic/extended",
+        "akasha",
+    ]:
+        (data_dir / d).mkdir(parents=True, exist_ok=True)
+
+    semantic_core = data_dir / "memory/semantic/core.jsonl"
     if not semantic_core.exists():
         semantic_core.touch()
 
@@ -126,7 +131,7 @@ def _setup_filesystem(
     write(home / "dharma/identity.md", constitution)
 
     write(
-        home / "agent.json",
+        data_dir / "agent.json",
         json.dumps(
             {
                 "name": agent_name,
@@ -169,11 +174,11 @@ def _setup_filesystem(
     )
 
 
-def _inject_seed_karma(home: Path, agent_name: str, seed: SeedKarma) -> None:
+def _inject_seed_karma(home: Path, data_dir: Path, agent_name: str, seed: SeedKarma) -> None:
     ts = datetime.now(timezone.utc).isoformat()
 
     if seed.semantic_core:
-        core_path = home / "karma/semantic/core.jsonl"
+        core_path = data_dir / "memory/semantic/core.jsonl"
         with core_path.open("a", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
@@ -186,7 +191,7 @@ def _inject_seed_karma(home: Path, agent_name: str, seed: SeedKarma) -> None:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
     if seed.episodic:
-        path = home / "karma/episodic/extended" / f"{agent_name}-seed.jsonl"
+        path = data_dir / "memory/episodic/extended" / f"{agent_name}-seed.jsonl"
         with path.open("w", encoding="utf-8") as f:
             for entry in seed.episodic:
                 entry.setdefault("ts", ts)
@@ -229,11 +234,11 @@ def _setup_agent_venv(home: Path, agent_name: str) -> None:
 # ── Runtime support files ──────────────────────────────────────────────────────
 
 
-def _create_budget_file(home: Path) -> None:
-    from ..memory.budget import DEFAULT_HEARTBEAT_WEEKLY_BUDGET, save_budget
-    path = home / "budget.json"
+def _create_budget_file(data_dir: Path) -> None:
+    from ..agent.budget import DEFAULT_HEARTBEAT_WEEKLY_BUDGET, save_budget
+    path = data_dir / "budget.json"
     if not path.exists():
-        save_budget(home, {
+        save_budget(data_dir, {
             "week_start": _get_week_start(),
             "tokens_used": 0,
             "status": "active",
@@ -241,15 +246,6 @@ def _create_budget_file(home: Path) -> None:
             "heartbeat_cycles": {},
         })
 
-
-def _create_fifo(agent_name: str) -> None:
-    fifo_path = Path("/var/aurelia/queue") / agent_name
-    if not fifo_path.exists():
-        os.mkfifo(fifo_path)
-    try:
-        os.chmod(fifo_path, 0o666)
-    except PermissionError:
-        pass
 
 
 def _update_config(agent_name: str, token: str) -> None:
@@ -297,11 +293,7 @@ def _create_linux_user(name: str) -> None:
     )
     for group in ("agent_group",):
         try:
-            subprocess.run(
-                ["usermod", "-aG", group, name],
-                check=True,
-                capture_output=True,
-            )
+            subprocess.run(["usermod", "-aG", group, name], check=True, capture_output=True)
         except subprocess.CalledProcessError:
             pass  # group may not exist in dev
 
@@ -312,52 +304,81 @@ def _destroy_linux_user(name: str) -> None:
     subprocess.run(["userdel", name], check=True, capture_output=True)
 
 
-def _chown(name: str, home: Path) -> None:
+def _chown(name: str, home: Path, data_dir: Path, run_dir: Path) -> None:
     def _run(cmd: list[str]) -> None:
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
             print(f"[provisioning] WARNING: {' '.join(cmd)!r} failed: {result.stderr.decode().strip()}")
 
+    # Agent-owned workspace: agent + aurelia_admin, 770
     _run(["chown", "-R", f"{name}:aurelia_admin", str(home)])
-    _run(["chmod", "750", str(home)])
-    for d in ["karma", "akasha"]:
-        if (home / d).exists():
-            _run(["chmod", "-R", "770", str(home / d)])
-    for d in ["room", "identity", "dharma"]:
-        if (home / d).exists():
-            _run(["chmod", "-R", "750", str(home / d)])
+    _run(["chmod", "-R", "770", str(home)])
+
+    # Agent data dir: agent owns it, aurelia_admin group for samsara/zuzu access
+    _run(["chown", "-R", f"{name}:aurelia_admin", str(data_dir)])
+    _run(["chmod", "-R", "770", str(data_dir)])
+
+    # Agent-owned runtime state (Manas socket + pid): agent + aurelia_admin, 770
+    _run(["chown", "-R", f"{name}:aurelia_admin", str(run_dir)])
+    _run(["chmod", "-R", "770", str(run_dir)])
+
+
+MANAS_LAUNCHER = "/opt/aurelia/bin/manas-launch"
+
+
+def _sudoers_entry(name: str) -> str:
+    return f"%aurelia_admin ALL = ({name}) NOPASSWD,SETENV: {MANAS_LAUNCHER} {name}"
 
 
 def _add_to_sudoers(name: str) -> None:
-    """Add agent to sudoers so aurelia runtime can execute bash as this user."""
+    """Add agent to sudoers so aurelia_admin members can launch Manas as this user."""
     sudoers_path = Path("/etc/sudoers.d/aurelia")
     if not sudoers_path.exists():
         return
     content = sudoers_path.read_text()
-    for line in content.splitlines():
-        if line.startswith("aurelia ALL") and f"({name})" in line:
-            return  # already present
-    new_content = content.rstrip() + f"\naurelia ALL = ({name}) NOPASSWD: /bin/bash\n"
+    entry = _sudoers_entry(name)
+    if entry in content:
+        return
+    # Remove any old broad entry for this agent (aurelia ALL = (name) NOPASSWD: /bin/bash)
+    lines = [l for l in content.splitlines()
+             if not (f"({name})" in l and "/bin/bash" in l)]
+    new_content = "\n".join(lines).rstrip() + f"\n{entry}\n"
     sudoers_path.write_text(new_content)
 
 
 def _remove_from_sudoers(name: str) -> None:
-    """Remove ephemeral agent from sudoers."""
+    """Remove agent from sudoers."""
     sudoers_path = Path("/etc/sudoers.d/aurelia")
     if not sudoers_path.exists():
         return
     content = sudoers_path.read_text()
-    lines = [l for l in content.splitlines() if not (f"({name})" in l and l.startswith("aurelia"))]
-    # Also remove from combined lines
-    new_content = "\n".join(lines) + "\n"
-    new_content = new_content.replace(f"{name}, ", "").replace(f", {name}", "")
-    sudoers_path.write_text(new_content)
+    entry = _sudoers_entry(name)
+    lines = [l for l in content.splitlines()
+             if l != entry and not (f"({name})" in l and "/bin/bash" in l)]
+    sudoers_path.write_text("\n".join(lines) + "\n")
 
 
 # ── Shared provisioning core ───────────────────────────────────────────────────
 
 
-def _provision(
+def _provision(name: str) -> None:
+    """
+    Register an agent with the OS: Linux user, groups, directories, sudoers, permissions.
+    OS-level primitives only — nothing about workspace content (that's standup's job).
+    """
+    home = AGENT_HOME_BASE / name
+    data_dir = AGENT_DATA_BASE / name
+    run_dir = AGENT_RUN_BASE / name
+
+    _create_linux_user(name)
+    home.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _add_to_sudoers(name)
+    _chown(name, home, data_dir, run_dir)
+
+
+def _standup_agent(
     name: str,
     display_name: str,
     constitution: str,
@@ -365,23 +386,21 @@ def _provision(
     seed_karma: SeedKarma | None,
     overwrite: bool,
 ) -> str:
-    """Create Linux user, filesystem, and runtime support files. Returns token."""
-    token = secrets.token_hex(32)
+    """
+    Initialize agent workspace: filesystem content, venv, budget, config token.
+    Assumes the agent has already been provisioned (OS primitives exist).
+    Returns token.
+    """
     home = AGENT_HOME_BASE / name
+    data_dir = AGENT_DATA_BASE / name
+    token = secrets.token_hex(32)
 
-    _create_linux_user(name)
-    home.mkdir(parents=True, exist_ok=True)
-    _setup_filesystem(home, name, display_name, constitution, model, overwrite=overwrite)
+    _setup_filesystem(home, data_dir, name, display_name, constitution, model, overwrite=overwrite)
     _setup_agent_venv(home, name)
-
     if seed_karma:
-        _inject_seed_karma(home, name, seed_karma)
-
-    _create_budget_file(home)
-    _create_fifo(name)
+        _inject_seed_karma(home, data_dir, name, seed_karma)
+    _create_budget_file(data_dir)
     _update_config(name, token)
-    _chown(name, home)
-    _add_to_sudoers(name)
 
     return token
 
@@ -411,7 +430,8 @@ def create_agent(
     Returns:
         AgentConfig. Caller must trigger a runtime registry reload.
     """
-    _provision(
+    _provision(name)
+    _standup_agent(
         name=name,
         display_name=name.capitalize(),
         constitution=load_constitution(name, constitution),
@@ -425,13 +445,12 @@ def create_agent(
 
 def destroy_agent(name: str) -> None:
     """Permanently destroy a named agent, removing their home dir and all config."""
-    import subprocess as _sp
     _remove_from_sudoers(name)
     _remove_from_config(name)
     _destroy_linux_user(name)
-    home = Path(f"/home/{name}")
-    if home.exists():
-        _sp.run(["rm", "-rf", str(home)], check=True)
+    for d in (AGENT_HOME_BASE / name, AGENT_DATA_BASE / name, AGENT_RUN_BASE / name):
+        if d.exists():
+            shutil.rmtree(d)
 
 
 def create_ephemeral_agent(
@@ -457,7 +476,8 @@ def create_ephemeral_agent(
         EphemeralAgent. Caller must trigger a runtime registry reload.
     """
     name = f"exp-{base_agent}-{secrets.token_hex(4)}"
-    token = _provision(
+    _provision(name)
+    token = _standup_agent(
         name=name,
         display_name=base_agent.capitalize(),
         constitution=load_constitution(base_agent, constitution),
@@ -473,19 +493,15 @@ def destroy_ephemeral_agent(agent: EphemeralAgent) -> None:
     """
     Tear down an ephemeral agent completely.
 
-    Removes Linux user, home directory, FIFO, budget file, and config token.
+    Removes Linux user, home directory, run dir, data dir, and config token.
     Caller should trigger a runtime registry reload afterwards.
 
     Requires root privileges.
     """
-    fifo = Path("/var/aurelia/queue") / agent.name
-    if fifo.exists():
-        fifo.unlink()
-
     _remove_from_config(agent.name)
     _remove_from_sudoers(agent.name)
     _destroy_linux_user(agent.name)
 
-    home = AGENT_HOME_BASE / agent.name
-    if home.exists():
-        shutil.rmtree(home)
+    for d in (AGENT_HOME_BASE / agent.name, AGENT_DATA_BASE / agent.name, AGENT_RUN_BASE / agent.name):
+        if d.exists():
+            shutil.rmtree(d)

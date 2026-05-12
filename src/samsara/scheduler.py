@@ -1,4 +1,4 @@
-"""Scheduler: ScheduledItem model, storage, enqueue, and daemon."""
+"""Scheduler: ScheduledItem model, storage, and daemon."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ SCHEDULER_BASE = Path("/var/aurelia/scheduler")
 PENDING_DIR = SCHEDULER_BASE / "pending"
 COMPLETED_DIR = SCHEDULER_BASE / "completed"
 FAILED_DIR = SCHEDULER_BASE / "failed"
-FIFO_BASE = Path("/var/aurelia/queue")
-
 import os
 SCHEDULER_CHECK_INTERVAL = int(os.environ.get("AURELIA_SCHEDULER_INTERVAL", "60"))
 
@@ -209,25 +207,6 @@ def reschedule(item: ScheduledItem, reference_time: datetime) -> None:
     write_scheduled_item(item)
 
 
-def enqueue(agent_name: str, item: ScheduledItem) -> bool:
-    """Write a work item to the agent's FIFO queue. Returns True on success."""
-    fifo_path = FIFO_BASE / agent_name
-    if not fifo_path.exists():
-        # In development (no FIFO), fall through — daemon will call API directly
-        return False
-    try:
-        # Open with O_WRONLY | O_NONBLOCK to avoid blocking if no reader
-        import os
-        fd = os.open(str(fifo_path), os.O_WRONLY | os.O_NONBLOCK)
-        try:
-            line = json.dumps(item.to_dict()) + "\n"
-            os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
-        return True
-    except OSError:
-        return False
-
 
 def count_pending_for_agent(agent_name: str) -> int:
     """Count pending items for a specific agent (for health endpoint)."""
@@ -284,11 +263,25 @@ class SchedulerDaemon:
                 self._fire_item(item, now)
 
     def _fire_item(self, item: ScheduledItem, now: datetime) -> None:
-        """Fire a scheduled item by calling runtime_core directly — no HTTP hop needed."""
+        """Fire a scheduled item — route to Manas if live, otherwise call runtime_core directly."""
         from . import runtime_core as _runtime
         try:
-            _runtime.process_scheduled_item(item.to_dict())
-            print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})")
+            dispatched_via_manas = False
+            try:
+                from .config import load_agent_config
+                from .runtime_daemon import _is_manas_live, _route_to_manas
+                config = load_agent_config(item.agent)
+                if _is_manas_live(config):
+                    _route_to_manas(config, {"type": "internal_process", **item.to_dict()})
+                    dispatched_via_manas = True
+            except Exception:
+                pass
+
+            if not dispatched_via_manas:
+                _runtime.process_scheduled_item(item.to_dict())
+
+            print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})"
+                  + (" via manas" if dispatched_via_manas else ""))
             if item.recurring:
                 reschedule(item, now)
             else:

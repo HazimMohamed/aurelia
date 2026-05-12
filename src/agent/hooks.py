@@ -18,6 +18,7 @@ class HookType(str, Enum):
 
 BULLETIN_PATH = Path("/var/aurelia/bulletin.jsonl")
 SCHEDULER_PENDING_DIR = Path("/var/aurelia/scheduler/pending")
+_HEARTBEAT_PRACTICES_PATH = Path(__file__).parent.parent.parent / "dharma" / "heartbeat_practices.md"
 
 
 def count_bulletin_unread(agent: AgentConfig) -> int:
@@ -85,7 +86,7 @@ def heartbeat_precheck(agent: AgentConfig) -> bool:
     """
     # Budget check — skip heartbeat if paused or below minimum threshold
     try:
-        from ..memory.budget import get_budget_remaining, is_budget_ok
+        from .budget import get_budget_remaining, is_budget_ok
         if not is_budget_ok(agent):
             return False
         remaining = get_budget_remaining(agent)
@@ -102,8 +103,6 @@ def heartbeat_precheck(agent: AgentConfig) -> bool:
 
 def format_heartbeat_prompt(agent: AgentConfig) -> str:
     """Build the heartbeat prompt text for the agent."""
-    from ..memory.budget import get_heartbeat_history, get_heartbeat_tokens_used, load_budget
-
     unread = count_bulletin_unread(agent)
     scheduled = count_scheduled_now(agent)
 
@@ -122,19 +121,24 @@ def format_heartbeat_prompt(agent: AgentConfig) -> str:
 
     # Budget block
     try:
-        budget = load_budget(agent.home)
+        from .budget import compute_cost, get_heartbeat_remaining, load_budget
+        budget = load_budget(agent.data_dir)
         heartbeat_limit = budget.get("heartbeat_weekly_budget", 100_000)
-        heartbeat_used = get_heartbeat_tokens_used(agent.home)
-        heartbeat_remaining = max(0, heartbeat_limit - heartbeat_used)
-        history = get_heartbeat_history(agent.home)
+        heartbeat_remaining = get_heartbeat_remaining(agent.data_dir)
+        heartbeat_used = heartbeat_limit - heartbeat_remaining
+        cost_so_far = compute_cost(budget.get("heartbeat_tokens", {}))
 
         parts += ["", "## Your Free-Time Budget"]
-        parts.append(f"{heartbeat_remaining:,} / {heartbeat_limit:,} tokens remaining this week.")
-        if history:
-            history_str = " → ".join(f"{t:,}" for t in history)
-            parts.append(f"Recent heartbeat usage (tokens per cycle): {history_str}")
+        parts.append(f"{heartbeat_remaining:,} / {heartbeat_limit:,} tokens remaining this week (${cost_so_far:.4f} spent).")
         parts.append("When your tokens run out you won't be able to explore freely. Noop if you'd rather save them for later.")
     except Exception:
+        pass
+
+    try:
+        practices = _HEARTBEAT_PRACTICES_PATH.read_text(encoding="utf-8").strip()
+        if practices:
+            parts += ["", "---", "", practices]
+    except OSError:
         pass
 
     parts += [

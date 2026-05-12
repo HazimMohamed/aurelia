@@ -23,7 +23,7 @@ from src.sandbox.sandbox import (
     acquire_sandbox_agent,
     release_sandbox_agent,
 )
-from src.samsara.config import AGENT_HOME_BASE, GLOBAL_CONFIG_PATH
+from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE, GLOBAL_CONFIG_PATH
 
 W = 60
 
@@ -48,15 +48,17 @@ check("acquired a slot", agent.name in SANDBOX_NAMES, agent.name)
 check("lock file is open", agent._lock_file is not None)
 
 home = AGENT_HOME_BASE / agent.name
+data_dir = AGENT_DATA_BASE / agent.name
 check("home dir exists", home.is_dir(), str(home))
 check("dharma/identity.md written", (home / "dharma/identity.md").exists())
-check("agent.json written", (home / "agent.json").exists())
-check("karma/semantic/core.jsonl exists", (home / "karma/semantic/core.jsonl").exists())
+check("data_dir exists", data_dir.is_dir(), str(data_dir))
+check("agent.json written to data_dir", (data_dir / "agent.json").exists())
+check("memory/semantic/core.jsonl exists", (data_dir / "memory/semantic/core.jsonl").exists())
 
 fifo = Path("/var/aurelia/queue") / agent.name
 check("FIFO created", fifo.exists(), str(fifo))
 
-budget = Path("/var/aurelia/budgets") / f"{agent.name}.json"
+budget = data_dir / "budget.json"
 check("budget file created", budget.exists(), str(budget))
 
 import json
@@ -82,6 +84,7 @@ finally:
 print("\n3. Release slot")
 release_sandbox_agent(agent)
 check("home wiped after release", not home.exists(), str(home))
+check("data_dir wiped after release", not data_dir.exists(), str(data_dir))
 check("FIFO removed", not fifo.exists())
 check("budget file removed", not budget.exists())
 cfg2 = json.loads(GLOBAL_CONFIG_PATH.read_text()) if GLOBAL_CONFIG_PATH.exists() else {}

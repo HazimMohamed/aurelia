@@ -29,15 +29,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_SONNET_BLENDED_COST_PER_M = 6.00  # conservative blended estimate (input $3 + output $15, input-heavy)
-
 _LAB_ROOT = Path(__file__).parent.parent  # aurelia/lab/
 _AURELIA_ROOT = _LAB_ROOT.parent          # aurelia/
 _ALEMBIC_ROOT = _LAB_ROOT
 if str(_AURELIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_AURELIA_ROOT))
 
-from src.samsara.config import AGENT_HOME_BASE
+from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE
+from src.agent.budget import compute_cost
 from src.samsara.provisioning import SeedKarma
 from src.sandbox.sandbox import SandboxAgent, acquire_sandbox_agent, release_sandbox_agent
 from src.agent.transcript import read_entries
@@ -56,12 +55,14 @@ class AureliaExperiment:
         seed_karma: SeedKarma | None = None,
         chain_from: Path | None = None,
         results_dir: Path | None = None,
+        run_bardo: bool = False,
     ) -> None:
         self.base_agent = base_agent
         self.experiment_id = experiment_id
         self.seed_karma = seed_karma
         self.chain_from = chain_from
         self._results_dir = results_dir or DEFAULT_COLD_STORAGE_DIR
+        self._run_bardo = run_bardo
 
         self._client = RuntimeClient()
         self._agent = None
@@ -70,8 +71,9 @@ class AureliaExperiment:
         self._start_time: datetime | None = None
         self._results: list[dict] = []
         self.cold_storage_dir: Path | None = None
-        self._tokens_before: int = 0
-        self.tokens_used: int = 0
+        self._tokens_before: dict = {}
+        self.tokens_delta: dict = {}
+        self.estimated_cost: float = 0.0
 
     def __enter__(self) -> "AureliaExperiment":
         self._start_time = datetime.now(timezone.utc)
@@ -99,9 +101,14 @@ class AureliaExperiment:
         if not self._agent:
             return
         try:
-            print("\n[ bardo ] Triggering bardo...")
-            self._client.trigger_bardo(self._agent.name)
-            self.tokens_used = self._read_budget_tokens(self._agent.name) - self._tokens_before
+            if self._run_bardo:
+                print("\n[ bardo ] Triggering bardo...")
+                self._client.trigger_bardo(self._agent.name)
+            else:
+                print("\n[ bardo ] Skipped.")
+            tokens_after = self._read_budget_tokens(self._agent.name)
+            self.tokens_delta = {k: tokens_after.get(k, 0) - self._tokens_before.get(k, 0) for k in tokens_after}
+            self.estimated_cost = compute_cost(self.tokens_delta)
             self._save_cold_storage()
         finally:
             print("\n[ teardown ] Releasing sandbox agent...")
@@ -112,16 +119,13 @@ class AureliaExperiment:
     # ── Budget helpers ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _read_budget_tokens(agent_name: str) -> int:
-        path = AGENT_HOME_BASE / agent_name / "budget.json"
+    def _read_budget_tokens(agent_name: str) -> dict:
+        path = AGENT_DATA_BASE / agent_name / "budget.json"
         try:
-            return json.loads(path.read_text()).get("tokens_used", 0)
+            data = json.loads(path.read_text())
+            return data.get("tokens", {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0})
         except (OSError, json.JSONDecodeError):
-            return 0
-
-    @staticmethod
-    def estimated_cost_usd(tokens: int) -> float:
-        return round(tokens * _SONNET_BLENDED_COST_PER_M / 1_000_000, 4)
+            return {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
     # ── Dispatch methods ───────────────────────────────────────────────────────
 
@@ -174,19 +178,31 @@ class AureliaExperiment:
     # ── Karma transplant (for chaining) ───────────────────────────────────────
 
     def _transplant_karma(self, snapshot_dir: Path) -> None:
-        home = self._agent.config.home
-        for d in ["karma", "akasha", "room"]:
-            src = snapshot_dir / d
-            dst = home / d
+        config = self._agent.config
+        name = self._agent.name
+
+        # Restore agent workspace (room)
+        for d in ["room"]:
+            src = snapshot_dir / "home" / d
+            dst = config.home / d
             if src.exists():
                 if dst.exists():
                     shutil.rmtree(dst)
                 shutil.copytree(src, dst, symlinks=True)
-        name = self._agent.name
-        subprocess.run(["chown", "-R", f"{name}:aurelia_admin", str(home)], capture_output=True)
-        for d in ["karma", "akasha", "room"]:
-            if (home / d).exists():
-                subprocess.run(["chmod", "-R", "770", str(home / d)], capture_output=True)
+
+        # Restore samsara-managed data (memory, akasha)
+        for d in ["memory", "akasha"]:
+            src = snapshot_dir / "data" / d
+            dst = config.data_dir / d
+            if src.exists():
+                if dst.exists():
+                    shutil.rmtree(dst)
+                shutil.copytree(src, dst, symlinks=True)
+
+        subprocess.run(["chown", "-R", f"{name}:aurelia_admin", str(config.home)], capture_output=True)
+        subprocess.run(["chmod", "-R", "770", str(config.home)], capture_output=True)
+        subprocess.run(["chown", "-R", "aurelia:aurelia_admin", str(config.data_dir)], capture_output=True)
+        subprocess.run(["chmod", "-R", "770", str(config.data_dir)], capture_output=True)
 
     # ── Cold storage ───────────────────────────────────────────────────────────
 
@@ -198,11 +214,13 @@ class AureliaExperiment:
         run_dir.mkdir(parents=True, exist_ok=True)
         self.cold_storage_dir = run_dir
 
-        # 1. Snapshot
+        # 1. Snapshot — both agent workspace and samsara data
         snapshot_dir = run_dir / "snapshot"
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)
-        shutil.copytree(self._agent.config.home, snapshot_dir, symlinks=True)
+        snapshot_dir.mkdir()
+        shutil.copytree(self._agent.config.home, snapshot_dir / "home", symlinks=True)
+        shutil.copytree(self._agent.config.data_dir, snapshot_dir / "data", symlinks=True)
 
         # 2. System prompt
         context_dir = run_dir / "context"
@@ -225,8 +243,8 @@ class AureliaExperiment:
             "chained_from": str(self.chain_from) if self.chain_from else None,
             "cached_context": "context/system_prompt.md",
             "cycles": len(self._results),
-            "tokens_used": self.tokens_used,
-            "estimated_cost_usd": self.estimated_cost_usd(self.tokens_used),
+            "tokens": self.tokens_delta,
+            "estimated_cost_usd": self.estimated_cost,
         }
         (run_dir / "experiment.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 

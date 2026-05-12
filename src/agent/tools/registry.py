@@ -52,6 +52,7 @@ def build_tool_registry(
     from .process_tools import register_process_tools
     from .comms_tools import register_comms_tools
     from .agent_tools import register_agent_tools
+    from .memory_tools import register_memory_tools
 
     registry = ToolRegistry()
 
@@ -61,6 +62,9 @@ def build_tool_registry(
     # bash_exec: blocking commands; process_*: background/persistent processes
     register_exec_tools(registry, agent_config)
     register_process_tools(registry, agent_config, incarnation=incarnation_state.get("name", "unknown"))
+
+    # Memory access tools (curated — no raw bash paths to samsara dirs needed)
+    register_memory_tools(registry, agent_config)
 
     # Communication tools for most hooks
     if hook_type in ("human_message", "heartbeat", "scheduled_task", "agent_invite"):

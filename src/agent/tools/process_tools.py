@@ -108,7 +108,7 @@ def handle_process_start(input_data: dict[str, Any], **ctx: Any) -> dict[str, An
 
     agent_config = ctx.get("agent_config")
     incarnation = ctx.get("incarnation", "unknown")
-    agent_home = Path("/home") / agent_config.name if agent_config else Path.home()
+    agent_home = agent_config.home if agent_config else Path.home()
     cwd = Path(cwd_override) if cwd_override else agent_home
     if not cwd.exists():
         cwd = agent_home
@@ -173,7 +173,7 @@ PROCESS_LIST_SCHEMA = {
 
 def handle_process_list(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     agent_config = ctx.get("agent_config")
-    agent_home = Path("/home") / agent_config.name if agent_config else Path.home()
+    agent_home = agent_config.home if agent_config else Path.home()
 
     entries = _load_registry(agent_home)
     if not entries:
@@ -223,7 +223,7 @@ def handle_process_logs(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     lines = int(input_data.get("lines", 50))
 
     agent_config = ctx.get("agent_config")
-    agent_home = Path("/home") / agent_config.name if agent_config else Path.home()
+    agent_home = agent_config.home if agent_config else Path.home()
 
     entries = _load_registry(agent_home)
     entry = next((e for e in entries if e["id"] == process_id), None)
@@ -273,7 +273,7 @@ def handle_process_stop(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
     process_id = input_data.get("process_id")
 
     agent_config = ctx.get("agent_config")
-    agent_home = Path("/home") / agent_config.name if agent_config else Path.home()
+    agent_home = agent_config.home if agent_config else Path.home()
 
     entries = _load_registry(agent_home)
     entry = next((e for e in entries if e["id"] == process_id), None)

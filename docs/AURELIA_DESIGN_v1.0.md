@@ -816,11 +816,6 @@ cli/                ← God-lite's control interface
                        scheduler tick, serve {http,discord}
     pretty_print.py    JSONL → readable markdown
 
-systemd/
-    aurelia-runtime.service     Runtime daemon as aurelia:aurelia
-    aurelia-server.service      HTTP transport as zuzu:zuzu
-    aurelia-{agent}.service     Per-agent daemons (M2 FIFO path)
-    aurelia-scheduler.service   Legacy scheduler unit (now folded into runtime)
 ```
 
 Two planes of privilege coexist:
@@ -965,45 +960,18 @@ One writer, one reader → natural master/slave queue model
 No files to clean up → items consumed on read
 ```
 
-### 6.6 Runtime + HTTP as systemd Units
+### 6.6 Daemon Lifecycle via CLI
 
-Two systemd units cover the core plane today:
+All daemon management flows through the `aurelia` CLI. There are no systemd units.
 
-```ini
-# /etc/systemd/system/aurelia-runtime.service
-[Unit]
-Description=Aurelia Runtime Daemon
-After=network.target
-
-[Service]
-User=aurelia
-Group=aurelia
-WorkingDirectory=/home/zuzu/Code/aurelia
-ExecStart=/home/zuzu/Code/aurelia/scripts/run_runtime.sh
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+```
+sudo aurelia start      — start the runtime daemon
+sudo aurelia stop       — stop the runtime daemon
+sudo aurelia restart    — restart (picks up code changes)
+sudo aurelia status     — show daemon + agent status
 ```
 
-```ini
-# /etc/systemd/system/aurelia-server.service
-[Unit]
-Description=Aurelia FastAPI Server
-After=network.target aurelia-runtime.service
-Requires=aurelia-runtime.service
-
-[Service]
-User=zuzu
-Group=zuzu
-WorkingDirectory=/home/zuzu/Code/aurelia/src
-ExecStart=/home/zuzu/.local/bin/uvicorn transport.http:app --host 0.0.0.0 --port 8000
-Restart=always
-EnvironmentFile=/home/zuzu/Code/aurelia/.env
-```
-
-Per-agent daemon units (`aurelia-{agent}.service`) exist for the FIFO-based privilege-separated deployment. In the current dev workflow, the runtime thread handles scheduled work in-process.
+The CLI spawns the runtime as the `aurelia` user (via `sudo -u aurelia`), stores the PID in `/var/aurelia/pids/runtime.pid`, and streams logs to the terminal. HTTP and Discord transports are also started through the CLI (`aurelia serve http`, `aurelia serve discord`).
 
 ### 6.7 Permission Model
 

@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 GLOBAL_CONFIG_PATH = Path("/var/aurelia/config.json")
-AGENT_HOME_BASE = Path("/home")
+AGENT_HOME_BASE = Path("/home")                # agent-owned workspace root
+AGENT_DATA_BASE = Path("/var/aurelia/agents")  # samsara-managed data root
+AGENT_RUN_BASE  = Path("/var/aurelia/run")     # agent-owned runtime state (sockets, pids)
 DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
 
 # Model IDs
@@ -64,29 +66,19 @@ class AgentConfig:
     def __post_init__(self) -> None:
         self.home = AGENT_HOME_BASE / self.name
 
+    # ── Samsara-managed data (under AGENT_DATA_BASE) ───────────────────────────
+
     @property
-    def identity_dir(self) -> Path:
-        return self.home / "identity"
+    def data_dir(self) -> Path:
+        return AGENT_DATA_BASE / self.name
 
     @property
     def karma_dir(self) -> Path:
-        return self.home / "karma"
+        return self.data_dir / "memory"
 
     @property
     def akasha_dir(self) -> Path:
-        return self.home / "akasha"
-
-    @property
-    def room_dir(self) -> Path:
-        return self.home / "room"
-
-    @property
-    def dharma_dir(self) -> Path:
-        return self.home / "dharma"
-
-    @property
-    def identity_path(self) -> Path:
-        return self.dharma_dir / "identity.md"
+        return self.data_dir / "akasha"
 
     @property
     def current_symlink(self) -> Path:
@@ -108,6 +100,38 @@ class AgentConfig:
     def semantic_extended_dir(self) -> Path:
         return self.karma_dir / "semantic" / "extended"
 
+    # ── Manas runtime state (under AGENT_RUN_BASE) ────────────────────────────
+
+    @property
+    def run_dir(self) -> Path:
+        return AGENT_RUN_BASE / self.name
+
+    @property
+    def manas_socket(self) -> Path:
+        return self.run_dir / "manas.sock"
+
+    @property
+    def manas_pid(self) -> Path:
+        return self.run_dir / "manas.pid"
+
+    # ── Agent-owned workspace (under AGENT_HOME_BASE) ──────────────────────────
+
+    @property
+    def room_dir(self) -> Path:
+        return self.home / "room"
+
+    @property
+    def dharma_dir(self) -> Path:
+        return self.home / "dharma"
+
+    @property
+    def identity_dir(self) -> Path:
+        return self.home / "identity"
+
+    @property
+    def identity_path(self) -> Path:
+        return self.dharma_dir / "identity.md"
+
 
 def load_global_config() -> dict:
     """Load /var/aurelia/config.json, return empty dict if missing."""
@@ -122,7 +146,7 @@ def load_agent_config(agent_name: str) -> AgentConfig:
     global_cfg = load_global_config()
     defaults = global_cfg.get("defaults", {})
 
-    agent_json_path = AGENT_HOME_BASE / agent_name / "agent.json"
+    agent_json_path = AGENT_DATA_BASE / agent_name / "agent.json"
 
     agent_data: dict = {}
     if agent_json_path.exists():
@@ -182,14 +206,16 @@ def load_agent_config(agent_name: str) -> AgentConfig:
 
 
 def list_known_agents() -> list[str]:
-    """Return agent names from global config that also have a home dir."""
+    """Return agent names from global config that also have a data dir."""
     if not GLOBAL_CONFIG_PATH.exists():
         return []
     with GLOBAL_CONFIG_PATH.open() as f:
         cfg = json.load(f)
     agents = []
     for name in cfg.get("agents", {}):
-        home = AGENT_HOME_BASE / name
-        if home.is_dir():
-            agents.append(name)
+        try:
+            if (AGENT_DATA_BASE / name).is_dir():
+                agents.append(name)
+        except PermissionError:
+            agents.append(name)  # include agents whose dirs we can't stat
     return sorted(agents)

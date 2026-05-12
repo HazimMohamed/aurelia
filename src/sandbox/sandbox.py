@@ -1,9 +1,10 @@
 """
 Sandbox pool for Alembic experiments.
 
-Five fixed Linux users (sandbox-1 through sandbox-5) are pre-provisioned once
-via provision_sandbox_pool(). Experiments borrow a slot via acquire_sandbox_agent(),
-use it, then return it via release_sandbox_agent() which wipes and resets the home.
+Five fixed Linux users (sandbox-1 through sandbox-5) are provisioned once via
+provision_sandbox_pool(). Experiments borrow a slot via acquire_sandbox_agent(),
+which stands up a fresh agent for that experiment. When done, release_sandbox_agent()
+tears it down and returns the slot to the pool.
 
 This avoids the overhead of useradd/userdel per experiment and lets the slots
 sit permanently in sudoers with correct permissions.
@@ -16,7 +17,7 @@ Usage:
         release_sandbox_agent(agent)
 
 One-time setup (run as root):
-    sudo python3 -c "from src.test.sandbox import provision_sandbox_pool; provision_sandbox_pool()"
+    sudo aurelia agent reset sandbox
 """
 
 from __future__ import annotations
@@ -27,17 +28,11 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..samsara.config import AGENT_HOME_BASE, AgentConfig, MODEL_SONNET
+from ..samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE, AGENT_RUN_BASE, AgentConfig, MODEL_SONNET
 from ..samsara.provisioning import (
     SeedKarma,
-    _add_to_sudoers,
-    _chown,
-    _create_budget_file,
-    _create_fifo,
-    _create_linux_user,
-    _inject_seed_karma,
-    _setup_filesystem,
-    _update_config,
+    _provision,
+    _standup_agent,
     load_constitution,
 )
 
@@ -82,26 +77,42 @@ def _release_slot(lock_file: object) -> None:
     lock_file.close()
 
 
-# ── Home reset ─────────────────────────────────────────────────────────────────
+# ── Stand up / tear down ───────────────────────────────────────────────────────
 
 
-def _reset_sandbox_home(
+def _standup_sandbox(
     name: str,
     base_agent: str,
     constitution: str,
     model: str,
     seed_karma: SeedKarma | None,
-) -> None:
-    """Wipe existing home content and re-provision for the new experiment."""
+) -> str:
+    """Wipe the slot and stand up a fresh agent workspace for a new experiment. Returns token."""
     home = AGENT_HOME_BASE / name
-    if home.exists():
-        shutil.rmtree(home)
-    home.mkdir(parents=True, exist_ok=True)
-    _setup_filesystem(home, name, base_agent.capitalize(), constitution, model, overwrite=True)
-    if seed_karma:
-        _inject_seed_karma(home, name, seed_karma)
-    _create_budget_file(home)
-    _chown(name, home)
+    data_dir = AGENT_DATA_BASE / name
+    for d in (home, data_dir):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+    return _standup_agent(
+        name=name,
+        display_name=base_agent.capitalize(),
+        constitution=constitution,
+        model=model,
+        seed_karma=seed_karma,
+        overwrite=True,
+    )
+
+
+def _teardown_sandbox(agent: SandboxAgent) -> None:
+    """Tear down an agent and wipe its slot clean."""
+    from ..samsara.provisioning import _remove_from_config
+
+    _remove_from_config(agent.name)
+
+    for d in (AGENT_HOME_BASE / agent.name, AGENT_DATA_BASE / agent.name, AGENT_RUN_BASE / agent.name):
+        if d.exists():
+            shutil.rmtree(d)
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -114,22 +125,14 @@ def acquire_sandbox_agent(
     model: str = MODEL_SONNET,
 ) -> SandboxAgent:
     """
-    Borrow a sandbox slot from the pool.
+    Borrow a sandbox slot from the pool, standing up a fresh agent on it.
 
-    Blocks until a slot is free, resets the home for the requested agent type,
-    and returns a SandboxAgent. Caller must call release_sandbox_agent() when
-    done — use a try/finally or context manager.
+    Caller must call release_sandbox_agent() when done — use a try/finally.
     """
-    import secrets
-    from ..samsara.provisioning import _update_config
-
     name, lock_file, lock_path = _acquire_slot()
-    token = secrets.token_hex(32)
 
     resolved_constitution = load_constitution(base_agent, constitution)
-    _reset_sandbox_home(name, base_agent, resolved_constitution, model, seed_karma)
-    _create_fifo(name)
-    _update_config(name, token)
+    token = _standup_sandbox(name, base_agent, resolved_constitution, model, seed_karma)
 
     config = AgentConfig(name=name, model=model, description=f"Sandbox: {base_agent}")
     return SandboxAgent(
@@ -144,28 +147,17 @@ def acquire_sandbox_agent(
 
 def release_sandbox_agent(agent: SandboxAgent) -> None:
     """
-    Return a sandbox slot to the pool.
+    Tear down the agent and return the slot to the pool.
 
-    Wipes the home directory and releases the flock so another experiment can
-    acquire this slot. Safe to call even if acquisition partially failed.
+    Safe to call even if acquisition partially failed.
     """
-    from ..samsara.provisioning import _remove_from_config
-
-    _remove_from_config(agent.name)
-
-    fifo = Path("/var/aurelia/queue") / agent.name
-    if fifo.exists():
-        fifo.unlink(missing_ok=True)
-
-    home = AGENT_HOME_BASE / agent.name
-    if home.exists():
-        shutil.rmtree(home)
+    _teardown_sandbox(agent)
 
     if agent._lock_file is not None:
         _release_slot(agent._lock_file)
 
 
-# ── One-time setup ─────────────────────────────────────────────────────────────
+# ── One-time pool provisioning ─────────────────────────────────────────────────
 
 
 def provision_sandbox_pool(
@@ -173,28 +165,26 @@ def provision_sandbox_pool(
     model: str = MODEL_SONNET,
 ) -> None:
     """
-    One-time setup: create sandbox-1..sandbox-N Linux users with correct
-    permissions, sudoers entries, and a skeleton home. Safe to re-run.
+    Provision the sandbox pool: create sandbox-1..sandbox-N Linux users with
+    correct permissions and sudoers entries. Safe to re-run.
 
-    Run as root before first use:
-        sudo python3 -c "from src.test.sandbox import provision_sandbox_pool; provision_sandbox_pool()"
+    Normally invoked via: sudo aurelia agent reset sandbox
     """
     SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
     SANDBOX_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["chown", "aurelia:aurelia_admin", str(SANDBOX_DIR)], check=True, capture_output=True)
-    subprocess.run(["chmod", "770", str(SANDBOX_DIR)], check=True, capture_output=True)
-    subprocess.run(["chown", "aurelia:aurelia_admin", str(SANDBOX_LOCK_DIR)], check=True, capture_output=True)
-    subprocess.run(["chmod", "770", str(SANDBOX_LOCK_DIR)], check=True, capture_output=True)
+    for cmd in [
+        ["chown", "aurelia:aurelia_admin", str(SANDBOX_DIR)],
+        ["chmod", "770", str(SANDBOX_DIR)],
+        ["chown", "aurelia:aurelia_admin", str(SANDBOX_LOCK_DIR)],
+        ["chmod", "770", str(SANDBOX_LOCK_DIR)],
+    ]:
+        r = subprocess.run(cmd, capture_output=True)
+        if r.returncode != 0:
+            print(f"[sandbox] WARNING: {' '.join(cmd)}: {r.stderr.decode().strip()}")
 
-    constitution = load_constitution(base_agent)
     for name in SANDBOX_NAMES:
         print(f"  Provisioning {name}...")
-        _create_linux_user(name)
-        home = AGENT_HOME_BASE / name
-        home.mkdir(parents=True, exist_ok=True)
-        _setup_filesystem(home, name, base_agent.capitalize(), constitution, model, overwrite=False)
-        _chown(name, home)
-        _add_to_sudoers(name)
+        _provision(name)
         print(f"  {name} ready.")
 
     print(f"  Sandbox pool ({SANDBOX_POOL_SIZE} slots) provisioned.")

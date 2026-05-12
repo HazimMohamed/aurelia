@@ -54,10 +54,9 @@ def _get_agent_config(agent_name: str) -> Optional[AgentConfig]:
     """Load an AgentConfig from the registry via the daemon."""
     # We use the config module directly for auth — it's read-only filesystem access
     # and doesn't need to go through the daemon.
-    from ..samsara.config import load_agent_config
+    from ..samsara.config import AGENT_DATA_BASE, load_agent_config
     try:
-        from pathlib import Path as _Path
-        agent_json = _Path("/home") / agent_name / "agent.json"
+        agent_json = AGENT_DATA_BASE / agent_name / "agent.json"
         if not agent_json.exists():
             return None
         return load_agent_config(agent_name)

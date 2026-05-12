@@ -1,0 +1,3 @@
+#!/bin/bash
+# Launch Manas for the named agent. Invoked via sudo from samsara/CLI.
+exec /opt/aurelia/.venv/bin/python3 -m src.samsara.manas "$@"

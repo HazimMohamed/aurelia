@@ -10,5 +10,7 @@ build/
 venv/
 ui/node_modules/
 
-# Lab experiment artifacts
-lab/crucible/*/results/
+scripts/
+
+# Experiment results: track everything except venvs inside snapshots
+lab/crucible/*/results/**/venv/

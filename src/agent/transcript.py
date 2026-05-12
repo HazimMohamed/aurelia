@@ -65,6 +65,7 @@ def write_assistant_message(
     content: str,
     cycle: int,
     thinking_blocks: list[dict] | None = None,
+    usage: dict[str, int] | None = None,
 ) -> None:
     entry: dict[str, Any] = {
         "ts": _now_iso(),
@@ -74,6 +75,8 @@ def write_assistant_message(
     }
     if thinking_blocks:
         entry["thinking_blocks"] = thinking_blocks
+    if usage:
+        entry["usage"] = usage
     append_entry(transcript_path, entry)
 
 

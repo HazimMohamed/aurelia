@@ -18,7 +18,7 @@ from .transcript import (
 )
 from .hooks import HookType
 
-MAX_TOOL_CYCLES = 20  # safety limit to prevent infinite loops
+MAX_TOOL_CYCLES = 30  # safety limit to prevent infinite loops
 
 StreamCallback = Callable[[dict[str, Any]], None]
 
@@ -94,7 +94,7 @@ def run_agent_cycle(
     if tool_registry:
         tool_registry._ctx_extras = {"tool_registry": tool_registry}
 
-    response_text, total_tokens, thinking_blocks = _run_with_tools(
+    response_text, usage, thinking_blocks = _run_with_tools(
         client=client,
         config=config,
         messages=messages,
@@ -111,18 +111,19 @@ def run_agent_cycle(
         response_text,
         cycle,
         thinking_blocks=thinking_blocks if thinking_blocks else None,
+        usage=usage if any(usage.values()) else None,
     )
 
-    if total_tokens > 0:
+    if any(usage.values()):
         try:
-            from ..memory.budget import check_and_apply_budget
+            from .budget import check_and_apply_budget
             incarnation_name = incarnation_state.get("name", "unknown")
             check_and_apply_budget(
                 config=config,
-                tokens_used=total_tokens,
+                usage=usage,
                 incarnation_name=incarnation_name,
                 task_in_progress=human_content[:100],
-                heartbeat_cycle_key=f"{incarnation_name}-{cycle}" if hook_type == HookType.HEARTBEAT else None,
+                is_heartbeat=hook_type == HookType.HEARTBEAT,
             )
         except Exception as e:
             print(f"[core] Budget tracking error: {e}")
@@ -133,6 +134,27 @@ def run_agent_cycle(
     ]
 
     return response_text
+
+
+def _with_cache_breakpoint(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark the last message before the final user turn with a cache_control breakpoint.
+
+    This caches the accumulated message history so subsequent cycles don't re-process
+    it as raw input. No-op if there's only one message (nothing to cache yet).
+    """
+    if len(messages) < 2:
+        return messages
+    messages = list(messages)
+    target = dict(messages[-2])
+    content = target.get("content", "")
+    if isinstance(content, str):
+        target["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+    elif isinstance(content, list) and content:
+        content = list(content)
+        content[-1] = {**content[-1], "cache_control": {"type": "ephemeral"}}
+        target["content"] = content
+    messages[-2] = target
+    return messages
 
 
 def _run_with_tools(
@@ -153,20 +175,21 @@ def _run_with_tools(
     deltas are silently accumulated and the final assembled response is returned —
     callers that don't want streaming get identical behaviour to before.
 
-    Returns (response_text, total_tokens_used, thinking_blocks).
+    Returns (response_text, usage, thinking_blocks).
+    usage is {input, cache_write, cache_read, output} token counts.
     thinking_blocks contains {thinking, signature} dicts for transcript storage
     and must be fed back into the message history on future turns.
     """
     tool_cycle = 0
-    total_tokens = 0
+    usage: dict[str, int] = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
 
     # Build create kwargs once; updated per tool round if needed
     max_tokens = 8192
     create_kwargs: dict[str, Any] = {
         "model": config.model,
         "max_tokens": max_tokens,
-        "system": system_prompt,
-        "messages": messages,
+        "system": [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+        "messages": _with_cache_breakpoint(messages),
     }
     if tools:
         create_kwargs["tools"] = tools
@@ -192,10 +215,10 @@ def _run_with_tools(
             final = stream.get_final_message()
 
         if hasattr(final, "usage") and final.usage:
-            total_tokens += (
-                getattr(final.usage, "input_tokens", 0)
-                + getattr(final.usage, "output_tokens", 0)
-            )
+            usage["input"] += getattr(final.usage, "input_tokens", 0)
+            usage["cache_write"] += getattr(final.usage, "cache_creation_input_tokens", 0)
+            usage["cache_read"] += getattr(final.usage, "cache_read_input_tokens", 0)
+            usage["output"] += getattr(final.usage, "output_tokens", 0)
 
         # Partition content blocks
         thinking_blocks: list[dict[str, Any]] = []
@@ -250,9 +273,9 @@ def _run_with_tools(
 
         # end_turn — final text response
         response_text = "\n".join(text_parts) if text_parts else ""
-        return response_text, total_tokens, thinking_blocks
+        return response_text, usage, thinking_blocks
 
-    return f"[Error: exceeded {MAX_TOOL_CYCLES} tool cycles without a text response]", total_tokens, []
+    return f"[Error: exceeded {MAX_TOOL_CYCLES} tool cycles without a text response]", usage, []
 
 
 def run_agent_cycle_and_parse(
