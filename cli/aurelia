@@ -112,6 +112,30 @@ def _read_pid(name: str) -> int | None:
     return None
 
 
+def _discover_http_pid() -> int | None:
+    """Find the PID of the process listening on port 8000 via /proc, and cache it."""
+    try:
+        result = subprocess.run(
+            ["ss", "-tlnp", "sport", "=", ":8000"],
+            capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            if ":8000" in line and "pid=" in line:
+                import re
+                m = re.search(r"pid=(\d+)", line)
+                if m:
+                    pid = int(m.group(1))
+                    try:
+                        pid_file = PIDS_DIR / "http.pid"
+                        pid_file.write_text(str(pid))
+                    except OSError:
+                        pass
+                    return pid
+    except Exception:
+        pass
+    return None
+
+
 def _pid_alive(pid: int | None) -> bool:
     if pid is None:
         return False
@@ -281,9 +305,9 @@ def _build_agents_table(agents: list[dict]) -> Table:
 
 def _build_system_table() -> Table:
     runtime_pid = _read_pid("runtime")
-    http_pid = _read_pid("http")
     runtime_up = _runtime_ok()
     http_up = _http_ok()
+    http_pid = _read_pid("http") or (http_up and _discover_http_pid()) or None
 
     table = Table(
         box=box.SIMPLE_HEAVY,
@@ -363,9 +387,11 @@ def cmd_status(once: bool) -> None:
 
     if once:
         runtime_pid = _read_pid("runtime")
-        http_pid = _read_pid("http")
-        print(f"runtime: {'up' if _runtime_ok() else 'down'} (pid={runtime_pid or '—'})")
-        print(f"http:    {'up' if _http_ok() else 'down'} (pid={http_pid or '—'})")
+        runtime_up = _runtime_ok()
+        http_up = _http_ok()
+        http_pid = _read_pid("http") or (http_up and _discover_http_pid()) or None
+        print(f"runtime: {'up' if runtime_up else 'down'} (pid={runtime_pid or '—'})")
+        print(f"http:    {'up' if http_up else 'down'} (pid={http_pid or '—'})")
         ok, agents = _socket_call({"type": "list_agents"})
         if ok and isinstance(agents, list):
             for a in agents:
