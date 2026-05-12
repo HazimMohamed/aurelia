@@ -36,7 +36,7 @@ from ..agent.hooks import HookType
 
 _PER_AGENT_TYPES = frozenset({
     "spawn", "dispatch", "get_history", "list_incarnations",
-    "get_active", "get_budget_info", "trigger_bardo", "internal_process",
+    "get_primary", "set_primary", "get_budget_info", "trigger_bardo", "internal_process",
 })
 
 
@@ -184,6 +184,7 @@ def _dispatch(request: dict[str, Any]) -> Any:
             return runtime.spawn(
                 agent=request["agent"],
                 goal=request.get("goal"),
+                make_primary=request.get("make_primary"),
             )
         case "dispatch":
             return runtime.dispatch(
@@ -205,14 +206,17 @@ def _dispatch(request: dict[str, Any]) -> Any:
             return runtime.get_health()
         case "trigger_bardo":
             agent = request["agent"]
-            active = runtime.get_active(agent)
-            if not active:
+            primary = runtime.get_primary(agent)
+            if not primary:
                 return {"status": "no_active", "agent": agent}
-            return runtime.trigger_bardo(agent, active)
+            return runtime.trigger_bardo(agent, primary)
         case "internal_process":
             return _dispatch_internal_process(request)
-        case "get_active":
-            return {"active": runtime.get_active(request["agent"])}
+        case "get_primary":
+            return {"primary": runtime.get_primary(request["agent"])}
+        case "set_primary":
+            runtime.set_primary(request["agent"], request["name"])
+            return {"status": "ok"}
         case "get_budget_info":
             return runtime.get_budget_info(request["agent"])
         case "registry_reload":

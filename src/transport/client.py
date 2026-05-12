@@ -32,9 +32,12 @@ class RuntimeClient:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def spawn(self, agent: str, goal: str | None = None) -> IncarnationSummary:
+    def spawn(self, agent: str, goal: str | None = None, make_primary: bool | None = None) -> IncarnationSummary:
         """Spawn a fresh incarnation for an agent."""
-        data = self._call({"type": "spawn", "agent": agent, "goal": goal})
+        req: dict = {"type": "spawn", "agent": agent, "goal": goal}
+        if make_primary is not None:
+            req["make_primary"] = make_primary
+        data = self._call(req)
         return IncarnationSummary(**data)
 
     def dispatch(
@@ -89,10 +92,14 @@ class RuntimeClient:
         """Trigger bardo for an agent's active incarnation."""
         return self._call({"type": "trigger_bardo", "agent": agent})
 
-    def get_active(self, agent: str) -> str | None:
-        """Return the active incarnation name for an agent, or None."""
-        data = self._call({"type": "get_active", "agent": agent})
-        return data.get("active")
+    def get_primary(self, agent: str) -> str | None:
+        """Return the primary incarnation name for an agent, or None."""
+        data = self._call({"type": "get_primary", "agent": agent})
+        return data.get("primary")
+
+    def set_primary(self, agent: str, name: str) -> None:
+        """Designate a specific incarnation as primary."""
+        self._call({"type": "set_primary", "agent": agent, "name": name})
 
     def get_budget_info(self, agent: str) -> dict[str, Any]:
         """Return raw budget dict for an agent."""

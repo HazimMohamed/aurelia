@@ -173,16 +173,19 @@ class Manas:
                 return runtime.get_history(agent=request["agent"], incarnation=request["incarnation"])
             case "list_incarnations":
                 return runtime.list_incarnations(agent=request["agent"])
-            case "get_active":
-                return {"active": runtime.get_active(request["agent"])}
+            case "get_primary" | "get_active":
+                return {"primary": runtime.get_primary(request["agent"])}
+            case "set_primary":
+                runtime.set_primary(request["agent"], request["name"])
+                return {"status": "ok"}
             case "get_budget_info":
                 return runtime.get_budget_info(request["agent"])
             case "trigger_bardo":
                 agent = request["agent"]
-                active = runtime.get_active(agent)
-                if not active:
+                primary = runtime.get_primary(agent)
+                if not primary:
                     return {"status": "no_active", "agent": agent}
-                return runtime.trigger_bardo(agent, active)
+                return runtime.trigger_bardo(agent, primary)
             case "internal_process":
                 from .runtime_daemon import _dispatch_internal_process
                 return _dispatch_internal_process(request)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -10,9 +11,10 @@ from .config import AgentConfig
 from ..agent.hooks import HookType
 from .registry import AgentRegistry
 from ..agent.incarnation import (
-    get_active_incarnation,
+    get_primary_incarnation,
     get_or_spawn_incarnation,
     spawn_incarnation,
+    set_primary_incarnation,
     load_incarnation,
     get_incarnation_by_id,
 )
@@ -24,16 +26,8 @@ from ..agent.transcript import read_entries
 
 # ── Runtime errors ─────────────────────────────────────────────────────────────
 
-class IncarnationAlreadyActive(Exception):
-    """Raised by spawn() when an active incarnation already exists for the agent."""
-
-
 class IncarnationNotFound(Exception):
     """Raised by dispatch() or get_history() when the named incarnation doesn't exist."""
-
-
-class IncarnationNotActive(Exception):
-    """Raised by dispatch() when the named incarnation exists but is not active."""
 
 
 class AgentNotFound(Exception):
@@ -46,7 +40,7 @@ class AgentNotFound(Exception):
 class IncarnationSummary:
     name: str
     agent: str
-    status: str          # "active" | "dissolved"
+    status: str          # "primary" | "active" | "dissolved"
     cycle: int
     last_active: Optional[str] = None
 
@@ -102,22 +96,26 @@ def _require_config(agent: str) -> AgentConfig:
 
 # ── Public runtime functions ───────────────────────────────────────────────────
 
-def spawn(agent: str, goal: Optional[str] = None) -> IncarnationSummary:
-    """Spawn a fresh incarnation. Raises IncarnationAlreadyActive if one is active."""
+def spawn(agent: str, goal: Optional[str] = None, make_primary: Optional[bool] = None) -> IncarnationSummary:
+    """Spawn a fresh incarnation. make_primary defaults to True when no primary exists."""
     config = _require_config(agent)
-    active = get_active_incarnation(config)
-    if active:
-        raise IncarnationAlreadyActive(
-            f"Agent '{agent}' already has active incarnation '{active}'"
-        )
-    name = spawn_incarnation(config)
+    if make_primary is None:
+        make_primary = get_primary_incarnation(config) is None
+    name = spawn_incarnation(config, make_primary=make_primary)
     state = load_incarnation(config, name)
+    status = "primary" if make_primary else "active"
     return IncarnationSummary(
         name=name,
         agent=agent,
-        status="active",
+        status=status,
         cycle=state["cycle"],
     )
+
+
+def set_primary(agent: str, name: str) -> None:
+    """Designate a specific incarnation as primary."""
+    config = _require_config(agent)
+    set_primary_incarnation(config, name)
 
 
 def dispatch(
@@ -130,7 +128,7 @@ def dispatch(
     """
     Send a hook payload to a specific incarnation.
     Raises IncarnationNotFound if incarnation doesn't exist.
-    Raises IncarnationNotActive if incarnation is not the active one.
+    Any live incarnation (primary or active) can receive messages.
     """
     config = _require_config(agent)
 
@@ -139,14 +137,6 @@ def dispatch(
     if not karma_path.exists():
         raise IncarnationNotFound(
             f"Incarnation '{incarnation}' not found for agent '{agent}'"
-        )
-
-    # Verify it is the active incarnation
-    active = get_active_incarnation(config)
-    if active != incarnation:
-        raise IncarnationNotActive(
-            f"Incarnation '{incarnation}' is not active for agent '{agent}' "
-            f"(active: {active!r})"
         )
 
     incarnation_state = load_incarnation(config, incarnation)
@@ -220,18 +210,18 @@ def get_history(agent: str, incarnation: str) -> list[TranscriptEntry]:
 
 def list_incarnations(agent: str) -> list[IncarnationSummary]:
     """
-    List all incarnations for an agent — active (karma) and dissolved (akasha).
+    List all incarnations for an agent — primary/active (karma) and dissolved (akasha).
     Raises AgentNotFound if agent is not registered.
     """
     config = _require_config(agent)
     summaries: list[IncarnationSummary] = []
 
-    active_name = get_active_incarnation(config)
+    primary_name = get_primary_incarnation(config)
 
-    # Walk karma dir for active incarnations
+    # Walk karma dir for live incarnations
     if config.karma_dir.exists():
         for entry in config.karma_dir.iterdir():
-            if entry.name in ("current", "episodic", "semantic"):
+            if entry.name in ("primary", "episodic", "semantic"):
                 continue
             if not entry.is_dir():
                 continue
@@ -239,7 +229,7 @@ def list_incarnations(agent: str) -> list[IncarnationSummary]:
             entries = read_entries(transcript_path)
             cycle = sum(1 for e in entries if e.get("type") == "human_message")
             last_active = _last_ts(entries)
-            status = "active" if entry.name == active_name else "sleeping"
+            status = "primary" if entry.name == primary_name else "active"
             summaries.append(IncarnationSummary(
                 name=entry.name,
                 agent=agent,
@@ -332,22 +322,11 @@ def _last_ts(entries: list[dict]) -> Optional[str]:
 
 def spawn_fresh_for_hook(agent: str, hook_type: str) -> dict:
     """
-    For autonomous hooks (heartbeat, scheduled_task, agent_invite): spawn a fresh
-    incarnation, removing any dangling active symlink first.
+    For autonomous hooks: get primary incarnation or spawn a fresh one as primary.
     Used by /internal/process — not part of the public runtime interface.
     """
     config = _require_config(agent)
-    if hook_type == HookType.HUMAN_MESSAGE:
-        return get_or_spawn_incarnation(config)
-
-    # Autonomous hooks always get a fresh incarnation
-    active = get_active_incarnation(config)
-    if active:
-        if config.current_symlink.is_symlink():
-            config.current_symlink.unlink()
-
-    name = spawn_incarnation(config)
-    return load_incarnation(config, name)
+    return get_or_spawn_incarnation(config)
 
 
 def run_hook(
@@ -384,10 +363,10 @@ def run_hook(
     return response_text, next_action
 
 
-def get_active(agent: str) -> Optional[str]:
-    """Return the active incarnation name for an agent, or None."""
+def get_primary(agent: str) -> Optional[str]:
+    """Return the primary incarnation name for an agent, or None."""
     config = _require_config(agent)
-    return get_active_incarnation(config)
+    return get_primary_incarnation(config)
 
 
 def process_scheduled_item(item: dict) -> dict:
@@ -426,9 +405,10 @@ def process_scheduled_item(item: dict) -> dict:
         return {"status": "skipped", "reason": "precheck_false", "agent": agent}
 
     incarnations = list_incarnations(agent)
-    active = next((i for i in incarnations if i.status == "active"), None)
-    if not active:
-        active = spawn(agent, goal=payload.get("goal"))
+    primary = next((i for i in incarnations if i.status == "primary"), None)
+    if not primary:
+        print(f"[runtime] No primary incarnation for '{agent}'; spawning fresh", file=sys.stderr)
+        primary = spawn(agent, make_primary=True, goal=payload.get("goal"))
 
     # Build the hook prompt so dispatch gets non-empty content
     goal = payload.get("goal", "")
@@ -436,7 +416,7 @@ def process_scheduled_item(item: dict) -> dict:
     prompt = build_hook_prompt(agent, hook.value if hasattr(hook, "value") else hook, goal, payload, rebirth_from)
     payload["content"] = prompt
 
-    return dispatch(agent, active.name, hook, payload).__dict__
+    return dispatch(agent, primary.name, hook, payload).__dict__
 
 
 def trigger_bardo(agent: str, incarnation: str) -> dict:

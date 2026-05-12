@@ -81,8 +81,8 @@ class AgentConfig:
         return self.data_dir / "akasha"
 
     @property
-    def current_symlink(self) -> Path:
-        return self.karma_dir / "current"
+    def primary_symlink(self) -> Path:
+        return self.karma_dir / "primary"
 
     @property
     def episodic_extended_dir(self) -> Path:

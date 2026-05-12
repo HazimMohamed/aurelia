@@ -25,8 +25,8 @@ def _get_existing_incarnation_names(karma_dir: Path) -> list[str]:
     if not karma_dir.exists():
         return names
     for entry in karma_dir.iterdir():
-        # Skip 'current' symlink, 'episodic', 'semantic' dirs
-        if entry.name in ("current", "episodic", "semantic"):
+        # Skip 'primary' symlink, 'episodic', 'semantic' dirs
+        if entry.name in ("primary", "episodic", "semantic"):
             continue
         if entry.is_dir():
             names.append(entry.name)
@@ -67,9 +67,9 @@ def generate_incarnation_name(agent_name: str, karma_dir: Path) -> str:
     return f"{agent_name}-{adjective}-{noun}-{suffix}"
 
 
-def get_active_incarnation(config: AgentConfig) -> Optional[str]:
-    """Return the active incarnation name via current symlink, or None."""
-    symlink = config.current_symlink
+def get_primary_incarnation(config: AgentConfig) -> Optional[str]:
+    """Return the primary incarnation name via primary symlink, or None."""
+    symlink = config.primary_symlink
     if symlink.is_symlink():
         target = symlink.resolve()
         if target.exists():
@@ -79,8 +79,19 @@ def get_active_incarnation(config: AgentConfig) -> Optional[str]:
     return None
 
 
-def spawn_incarnation(config: AgentConfig) -> str:
-    """Create a new incarnation directory, set current symlink, write start entry."""
+def set_primary_incarnation(config: AgentConfig, name: str) -> None:
+    """Point the primary symlink at the named incarnation directory."""
+    incarnation_dir = config.karma_dir / name
+    if not incarnation_dir.exists():
+        raise ValueError(f"Incarnation '{name}' not found for agent '{config.name}'")
+    symlink = config.primary_symlink
+    if symlink.is_symlink() or symlink.exists():
+        symlink.unlink()
+    symlink.symlink_to(incarnation_dir)
+
+
+def spawn_incarnation(config: AgentConfig, make_primary: bool = False) -> str:
+    """Create a new incarnation directory, write start entry, optionally set as primary."""
     incarnation_name = generate_incarnation_name(config.name, config.karma_dir)
     incarnation_dir = config.karma_dir / incarnation_name
     scratch_dir = incarnation_dir / "scratch"
@@ -95,11 +106,11 @@ def spawn_incarnation(config: AgentConfig) -> str:
     import subprocess as _sp
     _sp.run(["chown", config.name, str(scratch_dir)], capture_output=True)
 
-    # Update current symlink
-    symlink = config.current_symlink
-    if symlink.is_symlink() or symlink.exists():
-        symlink.unlink()
-    symlink.symlink_to(incarnation_dir)
+    if make_primary:
+        symlink = config.primary_symlink
+        if symlink.is_symlink() or symlink.exists():
+            symlink.unlink()
+        symlink.symlink_to(incarnation_dir)
 
     return incarnation_name
 
@@ -123,11 +134,11 @@ def load_incarnation(config: AgentConfig, incarnation_name: str) -> dict:
 
 
 def get_or_spawn_incarnation(config: AgentConfig) -> dict:
-    """Get active incarnation or spawn a new one. Returns incarnation state dict."""
-    active_name = get_active_incarnation(config)
-    if active_name:
-        return load_incarnation(config, active_name)
-    incarnation_name = spawn_incarnation(config)
+    """Get primary incarnation or spawn a new one as primary. Returns incarnation state dict."""
+    primary_name = get_primary_incarnation(config)
+    if primary_name:
+        return load_incarnation(config, primary_name)
+    incarnation_name = spawn_incarnation(config, make_primary=True)
     return load_incarnation(config, incarnation_name)
 
 

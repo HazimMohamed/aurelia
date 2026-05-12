@@ -109,10 +109,6 @@ def _runtime_error_to_http(e: RuntimeError) -> HTTPException:
         return HTTPException(status_code=404, detail=msg)
     if "IncarnationNotFound" in msg:
         return HTTPException(status_code=404, detail=msg)
-    if "IncarnationAlreadyActive" in msg:
-        return HTTPException(status_code=409, detail=msg)
-    if "IncarnationNotActive" in msg:
-        return HTTPException(status_code=409, detail=msg)
     return HTTPException(status_code=500, detail=msg)
 
 
@@ -199,9 +195,10 @@ class ProcessRequest(BaseModel):
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
 def _resolve_active_incarnation(agent_name: str, incarnation_id: Optional[str]):
-    """Find or spawn the active incarnation for a message request.
+    """Find or spawn the primary incarnation for a message request.
 
     Returns an IncarnationSummary. Raises HTTPException on any routing failure.
+    Any live incarnation (primary or active) can be addressed explicitly by id.
     """
     if incarnation_id:
         incarnations = runtime.list_incarnations(agent_name)
@@ -211,27 +208,21 @@ def _resolve_active_incarnation(agent_name: str, incarnation_id: Optional[str]):
                 status_code=404,
                 detail=f"Incarnation '{incarnation_id}' not found for agent '{agent_name}'",
             )
-        if target.status != "active":
+        if target.status not in ("primary", "active"):
             raise HTTPException(
                 status_code=409,
-                detail=f"Incarnation '{incarnation_id}' is not active (status: {target.status})",
+                detail=f"Incarnation '{incarnation_id}' is not live (status: {target.status})",
             )
         return target
 
     incarnations = runtime.list_incarnations(agent_name)
-    active = next((i for i in incarnations if i.status == "active"), None)
-    if not active:
+    primary = next((i for i in incarnations if i.status == "primary"), None)
+    if not primary:
         try:
-            active = runtime.spawn(agent_name)
+            primary = runtime.spawn(agent_name)
         except RuntimeError as e:
-            if "IncarnationAlreadyActive" in str(e):
-                incarnations = runtime.list_incarnations(agent_name)
-                active = next((i for i in incarnations if i.status == "active"), None)
-                if not active:
-                    raise HTTPException(status_code=500, detail=str(e))
-            else:
-                raise _runtime_error_to_http(e)
-    return active
+            raise _runtime_error_to_http(e)
+    return primary
 
 
 def _sse(event: str, data: dict) -> str:
@@ -506,16 +497,29 @@ def list_agents() -> dict:
 
 
 @app.post("/agents/{agent_name}/spawn")
-def spawn_incarnation(agent_name: str) -> dict:
-    """Spawn a new incarnation for an agent. Returns the new incarnation name."""
+def spawn_incarnation(agent_name: str, make_primary: Optional[bool] = None) -> dict:
+    """Spawn a new incarnation for an agent. make_primary defaults to True if none exists."""
     _require_agent(agent_name)
     try:
-        result = runtime.spawn(agent_name)
+        result = runtime.spawn(agent_name, make_primary=make_primary)
         return {"agent": agent_name, "incarnation": result.name, "status": result.status}
     except (RuntimeError, ConnectionError) as e:
         raise _runtime_error_to_http(RuntimeError(str(e)))
     except Exception as e:
         raise _classify_anthropic_error(e)
+
+
+@app.post("/agents/{agent_name}/incarnations/{incarnation_id}/set-primary")
+def set_primary_incarnation(agent_name: str, incarnation_id: str) -> dict:
+    """Designate a specific incarnation as the primary for an agent."""
+    _require_agent(agent_name)
+    try:
+        runtime.set_primary(agent_name, incarnation_id)
+        return {"agent": agent_name, "primary": incarnation_id}
+    except (RuntimeError, ConnectionError) as e:
+        raise _runtime_error_to_http(RuntimeError(str(e)))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ── Bardo (manual testing tool) ───────────────────────────────────────────────
@@ -526,7 +530,7 @@ def post_bardo(agent_name: str) -> BardoResponse:
     _require_agent(agent_name)
 
     try:
-        active = runtime.get_active(agent_name)
+        active = runtime.get_primary(agent_name)
     except RuntimeError as e:
         raise _runtime_error_to_http(e)
     except ConnectionError as e:
@@ -535,7 +539,7 @@ def post_bardo(agent_name: str) -> BardoResponse:
     if not active:
         raise HTTPException(
             status_code=409,
-            detail=f"Agent '{agent_name}' has no active incarnation to bardo.",
+            detail=f"Agent '{agent_name}' has no primary incarnation to bardo.",
         )
 
     try:
@@ -642,7 +646,7 @@ def internal_bardo(agent_name: str, request: Optional[dict] = None) -> dict:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found.")
 
     try:
-        active = runtime.get_active(agent_name)
+        active = runtime.get_primary(agent_name)
     except RuntimeError as e:
         raise _runtime_error_to_http(e)
     except ConnectionError as e:

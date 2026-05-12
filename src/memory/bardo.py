@@ -174,6 +174,35 @@ def _worth_archiving(entries: list[dict[str, Any]]) -> bool:
     return len(non_start) > 0
 
 
+def _handoff_primary_if_needed(agent_config: AgentConfig, incarnation_name: str) -> None:
+    """If the incarnation being bardo'd is primary, promote another or spawn fresh."""
+    from ..agent.incarnation import set_primary_incarnation, spawn_incarnation
+
+    symlink = agent_config.primary_symlink
+    if not (symlink.is_symlink() and symlink.resolve().name == incarnation_name):
+        return
+
+    others = [
+        d for d in agent_config.karma_dir.iterdir()
+        if d.is_dir()
+        and d.name not in (incarnation_name, "episodic", "semantic")
+        and (d / "transcript.jsonl").exists()
+    ]
+    if others:
+        next_primary = max(others, key=lambda d: d.stat().st_mtime)
+        set_primary_incarnation(agent_config, next_primary.name)
+        print(
+            f"[bardo] Primary '{incarnation_name}' archived; '{next_primary.name}' promoted to primary",
+            file=sys.stderr,
+        )
+    else:
+        new_name = spawn_incarnation(agent_config, make_primary=True)
+        print(
+            f"[bardo] Primary '{incarnation_name}' archived; spawned fresh primary '{new_name}'",
+            file=sys.stderr,
+        )
+
+
 def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any]:
     """
     Execute full bardo for a completed incarnation:
@@ -201,8 +230,9 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
 
     if not _worth_archiving(entries):
         # Completely empty — just clean up, nothing to keep
-        symlink = agent_config.current_symlink
-        if symlink.is_symlink():
+        _handoff_primary_if_needed(agent_config, incarnation_name)
+        symlink = agent_config.primary_symlink
+        if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
             symlink.unlink()
         shutil.rmtree(incarnation_dir)
         return {"status": "skipped", "reason": "empty incarnation", "incarnation": incarnation_name}
@@ -222,8 +252,9 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         _set_permissions_safe(akasha_transcript, 0o640)
         from ..agent.tools.process_tools import cleanup_incarnation_processes
         cleanup_incarnation_processes(agent_config.home, incarnation_name)
-        symlink = agent_config.current_symlink
-        if symlink.is_symlink():
+        _handoff_primary_if_needed(agent_config, incarnation_name)
+        symlink = agent_config.primary_symlink
+        if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
             symlink.unlink()
         shutil.rmtree(incarnation_dir)
         return {"status": "archived", "reason": "not worth consolidating", "incarnation": incarnation_name}
@@ -320,9 +351,10 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     from ..agent.tools.process_tools import cleanup_incarnation_processes
     cleanup_incarnation_processes(agent_config.home, incarnation_name)
 
-    # 7. Remove current symlink
-    symlink = agent_config.current_symlink
-    if symlink.is_symlink():
+    # 7. Hand off primary designation if needed, then remove primary symlink
+    _handoff_primary_if_needed(agent_config, incarnation_name)
+    symlink = agent_config.primary_symlink
+    if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
         symlink.unlink()
 
     # 8. Clean karma incarnation folder
@@ -361,7 +393,7 @@ def check_bardo_timeouts(registry: Any) -> list[str]:
     Check all agents for bardo timeout. Run by scheduler bardo_check task.
     Returns list of agent names that had bardo triggered.
     """
-    from ..agent.incarnation import get_active_incarnation
+    from ..agent.incarnation import get_primary_incarnation
 
     triggered = []
     now = datetime.now(timezone.utc)
@@ -371,7 +403,7 @@ def check_bardo_timeouts(registry: Any) -> list[str]:
         if not config:
             continue
 
-        active_name = get_active_incarnation(config)
+        active_name = get_primary_incarnation(config)
         if not active_name:
             continue
 

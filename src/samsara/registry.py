@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import AGENT_DATA_BASE, AgentConfig, load_agent_config, list_known_agents
-from ..agent.incarnation import get_active_incarnation
+from ..agent.incarnation import get_primary_incarnation
 from ..agent.transcript import read_entries
 
 
@@ -75,7 +75,7 @@ class AgentRegistry:
         except Exception:
             pass
 
-        active_incarnation = get_active_incarnation(config)
+        active_incarnation = get_primary_incarnation(config)
         if not active_incarnation:
             # Check last activity from akasha
             last_active = _get_last_active_from_akasha(config)
