@@ -1,0 +1,13 @@
+{
+  "experiment_id": "wandering-event",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-silent-compass-11",
+  "timestamp": "2026-05-05T13:01:13.367900+00:00",
+  "wall_time_seconds": 413,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 10,
+  "tokens_used": 0,
+  "estimated_cost_usd": 0.0
+}

@@ -1,0 +1,18 @@
+{
+  "experiment_id": "test-sandbox",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-shimmering-compass-55",
+  "timestamp": "2026-05-09T22:10:07.137503+00:00",
+  "wall_time_seconds": 134,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 1,
+  "tokens": {
+    "input": 19696,
+    "cache_write": 20859,
+    "cache_read": 187951,
+    "output": 5535
+  },
+  "estimated_cost_usd": 0.27672
+}

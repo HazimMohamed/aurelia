@@ -1,0 +1,11 @@
+{
+  "experiment_id": "faint-fracture",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-gleaming-compass-31",
+  "timestamp": "2026-05-04T15:25:31.932697+00:00",
+  "wall_time_seconds": 370,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 5
+}

@@ -1,0 +1,13 @@
+{
+  "experiment_id": "receding-gulf",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-gleaming-compass-72",
+  "timestamp": "2026-05-05T01:00:35.277045+00:00",
+  "wall_time_seconds": 647,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 15,
+  "tokens_used": 0,
+  "estimated_cost_usd": 0.0
+}

@@ -1,0 +1,11 @@
+{
+  "experiment_id": "azure-span",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-curious-compass-37",
+  "timestamp": "2026-05-04T15:50:05.364450+00:00",
+  "wall_time_seconds": 1179,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 15
+}

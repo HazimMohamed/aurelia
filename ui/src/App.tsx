@@ -1,35 +1,25 @@
-import { useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useStore } from "./store";
-import { fetchHealth, fetchAgents, fetchIncarnations } from "./lib/api";
+import { fetchHealth, fetchAgents, fetchIncarnations, spawnIncarnation } from "./lib/api";
 import { resolveTheme } from "./lib/theme";
-import { Nav } from "./components/Nav";
-import { ThemeToggle } from "./components/ThemeToggle";
-import { AgentSelector } from "./components/AgentSelector";
+import { UnifiedRail, type View } from "./components/UnifiedRail";
 import { Chat } from "./views/Chat";
-import { Agents } from "./views/Agents";
-import { Logs } from "./views/Logs";
+import { ComingSoon } from "./views/ComingSoon";
 import { useChat } from "./hooks/useChat";
 
-const PAGE_TITLES: Record<string, { title: string; sub: string }> = {
-  chat: { title: "Chat", sub: "Talk to an agent" },
-  agents: { title: "Agents", sub: "View and manage agents" },
-  logs: { title: "Logs", sub: "Live log stream" },
-};
-
 export default function App() {
-  const tab = useStore((s) => s.tab);
-  const connected = useStore((s) => s.connected);
-  const lastError = useStore((s) => s.lastError);
-  const settings = useStore((s) => s.settings);
+  const [view, setView] = useState<View>("Chat");
+  const [railCollapsed, setRailCollapsed] = useState(false);
+
+  const connected  = useStore((s) => s.connected);
+  const settings   = useStore((s) => s.settings);
   const applySettings = useStore((s) => s.applySettings);
   const { loadHistory } = useChat();
 
-  // Apply persisted theme on mount
+  // Apply theme on mount + system changes
   useEffect(() => {
     const theme = resolveTheme((settings.theme as "system" | "light" | "dark") ?? "system");
     document.documentElement.setAttribute("data-theme", theme);
-
-    // Watch system theme changes
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const handler = () => {
       if (!settings.theme || settings.theme === "system") {
@@ -40,14 +30,13 @@ export default function App() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Health polling + initial agent load
+  // Health polling + initial agent/incarnation load
   useEffect(() => {
     async function poll() {
       try {
         const result = await fetchHealth();
         useStore.setState({ connected: result.status === "healthy", lastError: null });
 
-        // Load agents on first connect
         const { agentsList, agentsLoading } = useStore.getState();
         if (!agentsList && !agentsLoading) {
           useStore.setState({ agentsLoading: true });
@@ -55,32 +44,31 @@ export default function App() {
             const agents = await fetchAgents();
             useStore.setState({ agentsList: agents, agentsLoading: false });
 
-            // Restore or auto-select first agent
             const state = useStore.getState();
             const persisted = state.settings.selectedAgent;
             const valid = persisted && agents.some((a) => a.name === persisted);
             const agentId = valid ? persisted : agents[0]?.name ?? null;
-            if (agentId && !state.selectedAgentId) {
-              useStore.setState({ selectedAgentId: agentId });
-
-              // Load incarnations
-              useStore.setState({ incarnationsLoading: true });
-              try {
-                const list = await fetchIncarnations(agentId);
-                const persistedInc = state.settings.selectedIncarnation;
-                const validInc = persistedInc && list.some((i) => i.name === persistedInc);
-                const selectedInc = validInc
-                  ? persistedInc
-                  : list.find((i) => i.status === "active")?.name ?? list[0]?.name ?? null;
-                useStore.setState({
-                  incarnationsList: list,
-                  selectedIncarnationId: selectedInc,
-                  incarnationsLoading: false,
-                });
-                await loadHistory();
-              } catch (err) {
-                useStore.setState({ incarnationsError: String(err), incarnationsLoading: false });
-              
+            if (agentId) {
+              if (!state.selectedAgentId) useStore.setState({ selectedAgentId: agentId });
+              if (!useStore.getState().incarnationsList) {
+                useStore.setState({ incarnationsLoading: true });
+                try {
+                  const list = await fetchIncarnations(agentId);
+                  const persistedInc = state.settings.selectedIncarnation;
+                  const validInc = persistedInc && list.some((i) => i.name === persistedInc);
+                  const selectedInc = validInc
+                    ? persistedInc
+                    : list.find((i) => i.status === "active")?.name ?? list[0]?.name ?? null;
+                  useStore.setState({
+                    incarnationsList: list,
+                    selectedIncarnationId: selectedInc,
+                    incarnationsLoading: false,
+                  });
+                  await loadHistory();
+                } catch (err) {
+                  useStore.setState({ incarnationsError: String(err), incarnationsLoading: false });
+                }
+              }
             }
           } catch (err) {
             useStore.setState({ agentsError: String(err), agentsLoading: false });
@@ -96,79 +84,84 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  const isChat = tab === "chat";
-  const { title, sub } = PAGE_TITLES[tab] ?? PAGE_TITLES["chat"];
-  const navCollapsed = settings.navCollapsed ?? false;
-  const chatFocus = isChat && (settings.chatFocusMode ?? false);
+  const selectIncarnation = useCallback(async (agentId: string, incId: string) => {
+    try {
+      useStore.setState({ selectedAgentId: agentId, selectedIncarnationId: incId });
+      applySettings({ selectedAgent: agentId, selectedIncarnation: incId });
+      await loadHistory();
+    } catch (err) {
+      console.error("selectIncarnation failed", err);
+    }
+  }, [loadHistory, applySettings]);
+
+  const handleSpawnIncarnation = useCallback(async (agentId: string) => {
+    try {
+      const result = await spawnIncarnation(agentId);
+      const list = await fetchIncarnations(agentId);
+      useStore.setState({ incarnationsList: list });
+      if (result.incarnation) {
+        await selectIncarnation(agentId, result.incarnation);
+      }
+    } catch (err) {
+      console.error("spawn failed", err);
+    }
+  }, [selectIncarnation]);
 
   return (
-    <div
-      className={[
-        "shell",
-        isChat ? "shell--chat" : "",
-        navCollapsed ? "shell--nav-collapsed" : "",
-        chatFocus ? "shell--chat-focus" : "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-    >
-      {/* Topbar */}
-      <header className="topbar">
-        <div className="topbar-left">
+    <div className="shell-c">
+      {/* ── Topbar ── */}
+      <header className="topbar-c">
+        <div className="topbar-c__left">
           <button
-            className="nav-collapse-toggle"
-            onClick={() => applySettings({ navCollapsed: !navCollapsed })}
-            title={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-label={navCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="topbar-c__hamburger"
+            onClick={() => setRailCollapsed((c) => !c)}
+            title={railCollapsed ? "Expand rail" : "Collapse rail"}
+            aria-label={railCollapsed ? "Expand rail" : "Collapse rail"}
           >
-            <span className="nav-collapse-toggle__icon">
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <line x1="3" y1="6" x2="21" y2="6" />
-                <line x1="3" y1="12" x2="21" y2="12" />
-                <line x1="3" y1="18" x2="21" y2="18" />
-              </svg>
-            </span>
+            {railCollapsed ? "›≡" : "≡"}
           </button>
-          <div className="brand">
-            <div className="brand-logo">
-              <img src="/favicon.svg" alt="Aurelia" />
-            </div>
-            <div className="brand-text">
-              <div className="brand-title">AURELIA</div>
-              <div className="brand-sub">Agent Dashboard</div>
-            </div>
-          </div>
+          <div className="topbar-c__brand-mark">A</div>
+          <span className="topbar-c__wordmark">Aurelia</span>
+          <span className="topbar-c__pill">local</span>
         </div>
-        <div className="topbar-status">
-          <div className="pill">
-            <span className={`statusDot ${connected ? "ok" : ""}`} />
-            <span>Backend</span>
-            <span className="mono">{connected ? "OK" : "Offline"}</span>
-          </div>
-          <ThemeToggle />
+        <div />
+        <div className="topbar-c__right">
+          <span className="topbar-c__cluster">
+            <span style={{ color: connected ? "#7a9d6a" : "var(--muted-soft)" }}>●</span>
+            {" "}{connected ? "cluster ok" : "offline"}
+          </span>
+          <div className="topbar-c__avatar">OC</div>
         </div>
       </header>
 
-      {/* Sidebar nav */}
-      <Nav />
+      {/* ── Body ── */}
+      <div
+        className="shell-c-body"
+        style={{ gridTemplateColumns: `${railCollapsed ? 56 : 268}px 1fr` }}
+      >
+        <UnifiedRail
+          collapsed={railCollapsed}
+          onToggle={() => setRailCollapsed((c) => !c)}
+          view={view}
+          onView={setView}
+          onSelectIncarnation={selectIncarnation}
+          onSpawnIncarnation={handleSpawnIncarnation}
+        />
 
-      {/* Main content */}
-      <main className={`content ${isChat ? "content--chat" : ""}`}>
-        <section className="content-header">
-          <div>
-            <div className="page-title">{title}</div>
-            <div className="page-sub">{sub}</div>
-          </div>
-          <div className="page-meta">
-            {lastError && !isChat && <div className="pill danger">{lastError}</div>}
-            {isChat && <AgentSelector />}
-          </div>
-        </section>
-
-        {tab === "chat" && <Chat />}
-        {tab === "agents" && <Agents />}
-        {tab === "logs" && <Logs />}
-      </main>
+        <main
+          style={{
+            display: "grid",
+            gridTemplateRows: view === "Chat" ? "auto 1fr auto" : "1fr",
+            minHeight: 0,
+            background: "var(--panel)",
+            overflow: "hidden",
+          }}
+        >
+          {view === "Chat"    && <Chat />}
+          {view === "Samsara" && <ComingSoon view="Samsara" />}
+          {view === "Logs"    && <ComingSoon view="Logs" />}
+        </main>
+      </div>
     </div>
   );
 }

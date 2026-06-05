@@ -523,7 +523,7 @@ def _start_http(env: dict | None = None) -> None:
         console.print(f"  [red]✗ Failed to start HTTP transport:[/red] {e}")
         return
 
-    console.print("  [dim]Waiting for HTTP transport...[/dim]", end="", flush=True)
+    console.print("  [dim]Waiting for HTTP transport...[/dim]", end="")
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if _http_ok():
@@ -859,6 +859,16 @@ def cmd_agent_stop(name: str) -> None:
         console.print(f"  [dim]Manas was not running[/dim]")
 
     console.print()
+
+
+@cmd_agent.command("restart")
+@click.argument("name")
+def cmd_agent_restart(name: str) -> None:
+    """Stop then start a Manas process for this agent."""
+    _require_root()
+    ctx = click.get_current_context()
+    ctx.invoke(cmd_agent_stop, name=name)
+    ctx.invoke(cmd_agent_start, name=name)
 
 
 @cmd_agent.command("status")

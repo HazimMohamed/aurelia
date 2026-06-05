@@ -60,12 +60,10 @@ class Manas:
 
         pid_path.write_text(str(os.getpid()))
 
-        # Signal bash_exec to skip sudo — we're already running as the agent user
-        os.environ["AURELIA_MANAS_AGENT"] = self.name
-
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
-        # 660: agent user + aurelia_admin group (samsara) can connect; others cannot
+        # 660: agent user + aurelia_admin group (runtime daemon) can connect; others cannot
+        # Group is inherited from the run dir (setgid bit set by provisioning).
         os.chmod(str(socket_path), 0o660)
         server.listen(16)
         server.settimeout(1.0)

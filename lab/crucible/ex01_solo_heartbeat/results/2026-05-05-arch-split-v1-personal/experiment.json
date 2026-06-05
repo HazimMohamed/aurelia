@@ -1,0 +1,18 @@
+{
+  "experiment_id": "arch-split-v1",
+  "agent": "sandbox-1",
+  "base_agent": "personal",
+  "incarnation": "sandbox-1-gleaming-forge-90",
+  "timestamp": "2026-05-05T22:45:05.190488+00:00",
+  "wall_time_seconds": 10,
+  "chained_from": null,
+  "cached_context": "context/system_prompt.md",
+  "cycles": 0,
+  "tokens": {
+    "input": 0,
+    "cache_write": 0,
+    "cache_read": 0,
+    "output": 0
+  },
+  "estimated_cost_usd": 0.0
+}

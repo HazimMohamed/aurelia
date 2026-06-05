@@ -177,7 +177,11 @@ def _dispatch(request: dict[str, Any]) -> Any:
         config = registry.get(agent_name)
         if config and _is_manas_live(config):
             return _route_to_manas(config, request)
-
+        if req_type == "dispatch":
+            raise RuntimeError(
+                f"Manas is not running for agent '{agent_name}'. "
+                "Start it with: sudo aurelia agent start <name>"
+            )
 
     match req_type:
         case "spawn":
@@ -187,12 +191,7 @@ def _dispatch(request: dict[str, Any]) -> Any:
                 make_primary=request.get("make_primary"),
             )
         case "dispatch":
-            return runtime.dispatch(
-                agent=request["agent"],
-                incarnation=request["incarnation"],
-                hook=HookType(request["hook"]),
-                payload=request.get("payload", {}),
-            )
+            raise RuntimeError("dispatch reached fallback — this should never happen")
         case "get_history":
             return runtime.get_history(
                 agent=request["agent"],
@@ -338,12 +337,10 @@ def _handle_connection(conn: socket.socket) -> None:
                     if _config and _is_manas_live(_config):
                         result = _route_to_manas_stream(_config, request, send_frame)
                     else:
-                        result = runtime.dispatch(
-                            agent=request["agent"],
-                            incarnation=request["incarnation"],
-                            hook=HookType(request["hook"]),
-                            payload=request.get("payload", {}),
-                            stream_callback=send_frame,
+                        agent_name = request.get("agent", "unknown")
+                        raise RuntimeError(
+                            f"Manas is not running for agent '{agent_name}'. "
+                            "Start it with: sudo aurelia agent start <name>"
                         )
                     duration_ms = int((time.monotonic() - t_start) * 1000)
                     send_frame({

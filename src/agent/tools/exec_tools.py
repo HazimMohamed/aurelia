@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -73,14 +72,7 @@ def handle_bash_exec(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     if not cwd.exists():
         cwd = Path.home()
 
-    agent_name = agent_config.name if agent_config else None
-    # Inside Manas the process already runs as the agent user — no sudo needed.
-    in_manas = os.environ.get("AURELIA_MANAS_AGENT") == agent_name
-    cmd = (
-        ["/bin/bash", "-c", command]
-        if (not agent_name or in_manas)
-        else ["sudo", "-u", agent_name, "/bin/bash", "-c", command]
-    )
+    cmd = ["/bin/bash", "-c", command]
 
     try:
         result = subprocess.run(

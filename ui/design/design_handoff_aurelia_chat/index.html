@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Aurelia · Chat refinements</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    /* Aurelia light palette — distilled from the codebase */
+    --bg:           #f7f2e8;
+    --bg-accent:    #f2ece1;
+    --bg-elevated:  #fbf7ef;
+    --bg-hover:     #ece4d6;
+    --bg-muted:     #eee6d9;
+    --card:         #fbf7ef;
+    --panel:        #f7f2e8;
+    --panel-strong: #efe7da;
+    --text:         #2b241d;
+    --text-strong:  #17120d;
+    --muted:        #74685b;
+    --muted-soft:   #8e8273;
+    --border:       #d8cdbd;
+    --border-strong:#c9bca8;
+    --border-hover: #ac9c86;
+    --accent:       #c9673a;
+    --accent-hover: #b95c31;
+    --accent-2:     #9b7750;
+    --accent-subtle:rgba(201,103,58,.12);
+    --accent-soft:  rgba(201,103,58,.22);
+    --ok:           #2f8a56;
+    --warn:         #b77f2d;
+    --danger:       #bd5338;
+    --info:         #5d7da8;
+    --shadow-sm:    0 1px 2px rgba(60,40,20,.06);
+    --shadow-md:    0 4px 14px rgba(60,40,20,.08), 0 0 0 1px rgba(0,0,0,.03);
+    --shadow-lg:    0 18px 40px rgba(60,40,20,.14), 0 0 0 1px rgba(0,0,0,.03);
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --body: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --serif: "Newsreader", "Iowan Old Style", Georgia, serif;
+  }
+  html, body { background: #ece4d6; margin: 0; }
+  body { font-family: var(--body); color: var(--text); letter-spacing: -0.01em; -webkit-font-smoothing: antialiased; }
+  /* Design canvas pane chrome tone */
+  .dc-canvas, .dc-pane { background: linear-gradient(180deg, #e9dfcd 0%, #e3d6c0 100%); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="chat-variants.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
