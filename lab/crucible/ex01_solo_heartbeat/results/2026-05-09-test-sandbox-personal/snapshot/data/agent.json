@@ -1,8 +1,0 @@
-{
-    "name": "sandbox-1",
-    "model": "claude-sonnet-4-6",
-    "description": "Aurelia agent: Personal",
-    "bardo": {
-        "model": "claude-sonnet-4-6"
-    }
-}
