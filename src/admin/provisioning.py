@@ -108,11 +108,10 @@ def _setup_filesystem(
     overwrite: bool = False,
 ) -> None:
     # Agent-owned workspace
-    for d in ["identity", "room", "constitution"]:
-        (home / d).mkdir(parents=True, exist_ok=True)
+    (home / "room").mkdir(parents=True, exist_ok=True)
 
-    # Runtime-managed data
-    for d in ["memory/extended", "akasha"]:
+    # Infra-managed data
+    for d in ["memory/extended", "akasha", "constitution", "identity"]:
         (data_dir / d).mkdir(parents=True, exist_ok=True)
 
     memory_core = data_dir / "memory/core.jsonl"
@@ -123,7 +122,7 @@ def _setup_filesystem(
         if overwrite or not path.exists():
             path.write_text(content, encoding="utf-8")
 
-    write(home / "constitution/identity.md", constitution)
+    write(data_dir / "constitution/identity.md", constitution)
 
     write(
         data_dir / "agent.json",
@@ -139,14 +138,14 @@ def _setup_filesystem(
     )
 
     write(
-        home / "identity/character.md",
+        data_dir / "identity/character.md",
         f"# Character\n\n"
         f"This is {display_name}'s character file. It will be populated over time "
         f"through interactions and bardo reflections.\n\n"
         f"Initial state: blank slate within the constraints of the constitution.",
     )
     write(
-        home / "identity/contract.md",
+        data_dir / "identity/contract.md",
         "# Contract\n\n"
         "## Commitments\n"
         "- Be present when Hazim arrives\n"
@@ -159,7 +158,7 @@ def _setup_filesystem(
         "- Do not fabricate memory you do not have",
     )
     write(
-        home / "identity/values.md",
+        data_dir / "identity/values.md",
         f"# Values\n\n"
         f"These values guide {display_name}'s behavior within its domain.\n\n"
         f"- Honesty over comfort\n"
@@ -304,13 +303,13 @@ def _chown(name: str, home: Path, data_dir: Path, run_dir: Path) -> None:
         if result.returncode != 0:
             print(f"[provisioning] WARNING: {' '.join(cmd)!r} failed: {result.stderr.decode().strip()}")
 
-    # constitution/ and identity/ — world-readable; owned by aurelia service
+    # constitution/ and identity/ — owned by aurelia service, readable by aurelia_admin
     for d in ("constitution", "identity"):
-        p = home / d
+        p = data_dir / d
         if p.exists():
             _run(["chown", "-R", "aurelia:aurelia_admin", str(p)])
-            _run(["chmod", "-R", "644", str(p)])
-            _run(["chmod", "755", str(p)])  # directory itself needs x
+            _run(["chmod", "-R", "640", str(p)])
+            _run(["chmod", "750", str(p)])  # directory itself needs x
 
     # room/ and scratch/ — agent + aurelia_admin, 770 (bash_exec writes here)
     for d in ("room",):

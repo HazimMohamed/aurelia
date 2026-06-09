@@ -113,12 +113,18 @@ class AgentConfig:
         return self.home / "room"
 
     @property
+    def scratch_dir(self) -> Path:
+        return self.home / "scratch"
+
+    # ── Infra-managed identity (under AGENT_DATA_BASE) ────────────────────────
+
+    @property
     def constitution_dir(self) -> Path:
-        return self.home / "constitution"
+        return self.data_dir / "constitution"
 
     @property
     def identity_dir(self) -> Path:
-        return self.home / "identity"
+        return self.data_dir / "identity"
 
     @property
     def identity_path(self) -> Path:

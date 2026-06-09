@@ -17,7 +17,7 @@
 
 **Akashic Records** — Complete, immutable archive of all dissolved non-trivial incarnations. Per-agent in `/var/aurelia/agents/{agent}/akasha/`. The past is permanent.
 
-**Constitution** — The governing document injected at the top of every incarnation's context. Read-only to agents. Lives in `/home/{agent}/constitution/`.
+**Constitution** — The governing document injected at the top of every incarnation's context. Written by infra at agent creation. Lives in `/var/aurelia/agents/{agent}/constitution/`.
 
 **Room** — Permanent agent-owned workspace (`/home/{agent}/room/`). Persists across all incarnations. Where personality accumulates over time.
 
@@ -269,11 +269,11 @@ Memory is the continuity. Incarnations are temporary. Memory is permanent.
 /home/{agent}/                         ← agent's world (mounted whole into bash_exec namespace)
     room/                              ← permanent workspace, never deleted
     scratch/{incarnation}/             ← incarnation workspace, archived to akasha then deleted
-    identity/                          ← character.md, values.md (read-only to agent)
-    constitution/                      ← constitution.md (read-only to agent)
 
 /var/aurelia/agents/{agent}/           ← infra's world (not mounted into bash_exec namespace)
     agent.json                         ← config (model, budget, heartbeat interval)
+    constitution/                      ← identity.md (injected into context; infra writes)
+    identity/                          ← character.md, contract.md, values.md (injected into context)
     memory/
         primary → {incarnation}/       ← symlink to primary incarnation
         {incarnation}/
@@ -455,7 +455,7 @@ Manas runs as a specific user to prevent prompt injection attacks from escalatin
 
 The agent/infrastructure boundary is enforced at the **tool layer**, not the OS layer. Manas and the agent's LLM tool calls run as the same Linux user, so filesystem permissions cannot distinguish between them. The enforcement mechanism is:
 
-- **`bash_exec`** runs inside a restricted mount namespace (via `bwrap`). The namespace mounts `/home/{agent}/` wholesale — room, scratch, identity, constitution — and nothing else from the agent's data. `/var/aurelia/` is not mounted at all. No bash parsing required; the kernel enforces it. This is not really a security decision, rather a practical limitation to prevent the agent from endlessly wandering off inspecting infra internals or the host system.
+- **`bash_exec`** runs inside a restricted mount namespace (via `bwrap`). The namespace mounts `/home/{agent}/` wholesale — room and scratch — and nothing else from the agent's data. `/var/aurelia/` is not mounted at all; identity and constitution are injected into context by infra, not accessible via bash. No bash parsing required; the kernel enforces it. This is not really a security decision, rather a practical limitation to prevent the agent from endlessly wandering off inspecting infra internals or the host system.
 
 - **Manas infrastructure code** reads and writes `/var/aurelia/` directly in Python, bypassing `bash_exec` entirely. It is trusted by definition.
 
@@ -486,13 +486,13 @@ Auth is enforced at the protocol level — each request carries the agent's bear
 | `core.jsonl` | `{agent}:aurelia_admin` | `640` | Manas reads/writes |
 | `extended/` | `{agent}:aurelia_admin` | `750` | Manas reads/writes |
 | `runtime.sock` | `aurelia:aurelia_agents` | `660` | Manas connects; runtime listens |
-| `constitution/`, `identity/` | `aurelia:aurelia` | `644` | World-readable |
+| `constitution/`, `identity/` | `aurelia:aurelia_admin` | `640/750` | Infra writes; injected into context |
 | `config.json` | `aurelia:aurelia_admin` | `640` | Runtime only |
 
 Agents **cannot** read their own Akashic records directly — this was disabled because agents would reflexively do this at startup and waste tokens. Memory access is controlled:
 1. Memory core → always loaded in system prompt
 2. `search_memory` tool → targeted retrieval from extended
-3. Bash access → `~/room/` and `~/scratch/{incarnation}/` (namespace-enforced)
+3. Bash access → `~/room/` and `~/scratch/{incarnation}/` only (namespace-enforced)
 
 ### 4.3 Source Tree
 

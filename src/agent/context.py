@@ -56,7 +56,7 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     if plane:
         parts.append(plane)
 
-    # 2. Identity — agent mission and character (constitution/identity.md in agent home)
+    # 2. Identity — agent mission and character
     identity = _read_file_safe(config.identity_path)
     if identity:
         parts.append(identity)
