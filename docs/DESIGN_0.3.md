@@ -472,7 +472,13 @@ OS permissions enforce coarse-grained isolation: agents cannot read each other's
 Agent users are members of `aurelia_agents` only. They are not in `aurelia_admin` and cannot read each other's files.
 
 **Runtime socket access:**
-Auth is enforced at the protocol level — each request carries the agent's bearer token, and the runtime validates it. An agent's token is scoped to its own agent name; it cannot dispatch requests for other agents.
+Auth is enforced via `SO_PEERCRED` — the OS provides the connecting process's UID, no bearer token required. Two tiers:
+
+- **Per-agent requests** (spawn, dispatch, bardo, etc.) — the connecting UID must match the Linux user for the named agent, or be root/aurelia. An agent cannot dispatch requests for a different agent.
+- **Admin requests** (registry_reload, scheduler_tick) — the connecting UID must be root or a member of `aurelia_admin`.
+- **Read-only requests** (list_agents, get_health) — open to any process that can reach the socket (i.e. any `aurelia_agents` member).
+
+The HTTP transport has its own bearer token layer for incoming HTTP requests, but speaks to the runtime socket as the `aurelia` service account via `SO_PEERCRED` like everything else.
 
 **Directory permissions:**
 
