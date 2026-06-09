@@ -4,6 +4,41 @@ A chronological record of what's been built.
 
 ---
 
+## Post-M3.5 Hardening — **COMPLETE** (2026-06)
+
+**Commits:** `86e5d90`–`b1f9284`
+
+**Delivered:** bwrap sandbox for bash_exec. Directory structure cleaned up. Socket auth enforced end-to-end.
+
+### bwrap Sandbox
+
+- `bash_exec` now runs inside a mount namespace via `bwrap`
+- `/var/aurelia/` not mounted — transcripts, budgets, akasha unreachable from agent shell
+- `/home/{agent}/` mounted wholesale: `room/` (rw, permanent) + `scratch/` (rw, incarnation-scoped)
+- Incarnation scratch mounted flat as `~/scratch/` — agent sees only its own files, no peer incarnation dirs
+- `HOME` set correctly via `--setenv`; network shared; fresh `/tmp`; project venv read-only
+- Graceful fallback to unnamespaced execution if `bwrap` absent (dev environments)
+
+### Directory Structure
+
+- `scratch/` moved from `/var/aurelia/agents/{agent}/memory/{incarnation}/` to `/home/{agent}/scratch/{incarnation}/`
+- `constitution/` and `identity/` moved from `/home/{agent}/` to `/var/aurelia/agents/{agent}/` — infra-owned, injected into context, not agent-accessible via bash
+- Semantic split documented: `/home/{agent}/` is the agent's world; `/var/aurelia/agents/{agent}/` is infra's world
+
+### Socket Auth
+
+- `SO_PEERCRED` UID enforcement added to all per-agent socket requests (was missing — any agent could dispatch to any other agent)
+- Admin operations (`registry_reload`, `scheduler_tick`) restricted to `aurelia_admin` group members
+- `_require_admin_uid` checks both primary group and supplementary group membership via `grp` + `pwd`
+
+### Bug Fixes
+
+- `_chown` now sets ownership on `/home/{agent}/` itself — was `root:root`, preventing agent from creating `scratch/` subdirs
+- `scratch_dir` property added to `AgentConfig`
+- System prompt scratch path corrected to show sandbox-visible `~/scratch/` rather than host-side incarnation path
+
+---
+
 ## M3.5 Architecture Cleanup — **COMPLETE** (2026-06)
 
 **Commits:** `58914c2`, `79166d5`
