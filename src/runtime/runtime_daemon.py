@@ -158,6 +158,14 @@ def _now_iso() -> str:
 # ── Request routing ────────────────────────────────────────────────────────────
 
 
+def _require_admin_uid(uid: int) -> None:
+    """Only root or the aurelia service account may perform admin operations."""
+    own_uid = os.getuid()
+    if uid == 0 or uid == own_uid:
+        return
+    raise PermissionError(f"UID {uid} is not permitted to perform admin operations")
+
+
 def _require_agent_uid(uid: int, claimed_agent: str) -> None:
     import pwd
     own_uid = os.getuid()
@@ -181,6 +189,7 @@ def _dispatch(request: dict[str, Any], peer_uid: int = -1) -> Any:
     if req_type in _PER_AGENT_TYPES:
         if not agent_name:
             raise ValueError(f"'{req_type}' requires 'agent' field")
+        _require_agent_uid(peer_uid, agent_name)
         registry = runtime.get_registry()
         config = registry.get(agent_name)
         if config is None:
@@ -227,10 +236,12 @@ def _dispatch(request: dict[str, Any], peer_uid: int = -1) -> Any:
                 scheduler.tick_now()
             return {"status": "scheduled", "id": item.id}
         case "registry_reload":
+            _require_admin_uid(peer_uid)
             registry = runtime.get_registry()
             registry._refresh()
             return {"status": "reloaded", "agents": registry.all_agents()}
         case "scheduler_tick":
+            _require_admin_uid(peer_uid)
             scheduler = getattr(runtime, "_scheduler", None)
             if scheduler is None:
                 raise RuntimeError("Scheduler not available")
