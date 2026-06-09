@@ -311,8 +311,12 @@ def _chown(name: str, home: Path, data_dir: Path, run_dir: Path) -> None:
             _run(["chmod", "-R", "640", str(p)])
             _run(["chmod", "750", str(p)])  # directory itself needs x
 
+    # home dir itself — agent owns it so they can create scratch/ subdirs
+    _run(["chown", f"{name}:aurelia_admin", str(home)])
+    _run(["chmod", "750", str(home)])
+
     # room/ and scratch/ — agent + aurelia_admin, 770 (bash_exec writes here)
-    for d in ("room",):
+    for d in ("room", "scratch"):
         p = home / d
         if p.exists():
             _run(["chown", "-R", f"{name}:aurelia_admin", str(p)])
