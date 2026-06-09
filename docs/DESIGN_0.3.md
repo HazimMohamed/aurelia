@@ -21,7 +21,7 @@
 
 **Room** — Permanent agent-owned workspace (`/home/{agent}/room/`). Persists across all incarnations. Where personality accumulates over time.
 
-**Scratch** — Incarnation-scoped workspace (`/var/aurelia/agents/{agent}/memory/{incarnation}/scratch/`). Archived to Akashic after bardo, then deleted.
+**Scratch** — Incarnation-scoped workspace (`/home/{agent}/scratch/{incarnation}/`). Archived to Akashic after bardo, then deleted.
 
 **Memory core** — Always-loaded distilled wisdom, size-capped per agent. The most fundamental durable knowledge and formative experiences. (`memory/core.jsonl`)
 
@@ -77,8 +77,10 @@ Format: `{agent}-{adjective}-{noun}-{random-suffix}`
 **Directory structure created:**
 ```
 /var/aurelia/agents/{agent}/memory/{incarnation}/
-    transcript.jsonl       ← Manas writes, agent reads
-    scratch/               ← agent owns, writable
+    transcript.jsonl       ← Manas writes, infra only
+
+/home/{agent}/scratch/{incarnation}/
+    ...                    ← agent owns, writable
 ```
 
 **Primary designation:**
@@ -208,7 +210,7 @@ def run_bardo(config, incarnation_name):
 
     # Step 5: Archive to Akashic
     copy(transcript_path → akasha/{name}/{name}-transcript.jsonl)
-    copy(scratch → akasha/{name}/scratch/)
+    copy(home/scratch/{name} → akasha/{name}/scratch/)
 
     # Step 6: Cleanup
     kill_incarnation_processes(incarnation_name)
@@ -238,7 +240,11 @@ def undissolve(agent: str, incarnation_name: str):
         akasha_path / f"{incarnation_name}-transcript.jsonl",
         memory_path / "transcript.jsonl"
     )
-    (memory_path / "scratch").mkdir()
+    scratch_path = config.home / "scratch" / incarnation_name
+    scratch_path.mkdir(parents=True, exist_ok=True)
+    # restore archived scratch if present
+    if (akasha_path / "scratch").exists():
+        shutil.copytree(akasha_path / "scratch", scratch_path, dirs_exist_ok=True)
 
     append_entry(memory_path / "transcript.jsonl", {
         "type": "undissolved",
@@ -260,31 +266,33 @@ Memory is the continuity. Incarnations are temporary. Memory is permanent.
 ### 2.1 Directory Structure
 
 ```
-/var/aurelia/agents/{agent}/
+/home/{agent}/                         ← agent's world (mounted whole into bash_exec namespace)
+    room/                              ← permanent workspace, never deleted
+    scratch/{incarnation}/             ← incarnation workspace, archived to akasha then deleted
+    identity/                          ← character.md, values.md (read-only to agent)
+    constitution/                      ← constitution.md (read-only to agent)
+
+/var/aurelia/agents/{agent}/           ← infra's world (not mounted into bash_exec namespace)
     agent.json                         ← config (model, budget, heartbeat interval)
     memory/
         primary → {incarnation}/       ← symlink to primary incarnation
         {incarnation}/
-            transcript.jsonl           ← Manas writes, agent reads
-            scratch/                   ← agent owns
-        core.jsonl                     ← always loaded, size-capped
-        extended/                      ← retrieved on demand by category
+            transcript.jsonl           ← Manas writes, agent never reads directly
+        core.jsonl                     ← always loaded into context; agent writes via tool
+        extended/                      ← retrieved on demand; agent writes via tool
             episodic.jsonl             ← bardo summaries, full conversation records
             {category}.jsonl           ← agent-chosen categories
     akasha/                            ← dissolved incarnations, infra writes
         {incarnation}/
             {incarnation}-transcript.jsonl
-            scratch/
-
-/home/{agent}/                         ← agent-owned workspace
-    room/                              ← permanent, never deleted
-    identity/                          ← character.md, values.md (read-only)
-    constitution/                      ← constitution.md (read-only)
+            scratch/                   ← scratch archived here on bardo
 
 /var/aurelia/run/{agent}/              ← runtime state (Manas)
     manas.sock                         ← Unix socket for work dispatch
     manas.pid                          ← process ID
 ```
+
+**The semantic split:** `/home/{agent}/` is the agent's world — everything there is for the agent to read and write freely. `/var/aurelia/agents/{agent}/` is the infra's world — the agent influences these through tools, never by direct filesystem access. The bwrap namespace enforces this mechanically: `/home/{agent}/` is mounted wholesale; `/var/aurelia/` is not mounted at all.
 
 Paths are centralized on `AgentConfig` (`src/config.py`). Every module resolves via properties like `config.memory_dir`, `config.akasha_dir`, `config.room_dir`.
 
@@ -447,9 +455,9 @@ Manas runs as a specific user to prevent prompt injection attacks from escalatin
 
 The agent/infrastructure boundary is enforced at the **tool layer**, not the OS layer. Manas and the agent's LLM tool calls run as the same Linux user, so filesystem permissions cannot distinguish between them. The enforcement mechanism is:
 
-- **`bash_exec`** runs inside a restricted mount namespace (via `bwrap` or equivalent). System paths (transcripts, budgets, akasha, etc.) are not mounted in the agent's view — unreachable regardless of how the path is constructed. No bash parsing required; the kernel enforces it. This is not really a security decision, rather a practical limitation to prevent the agent from endlessly wandering off inspecting the personal files on my system.
+- **`bash_exec`** runs inside a restricted mount namespace (via `bwrap`). The namespace mounts `/home/{agent}/` wholesale — room, scratch, identity, constitution — and nothing else from the agent's data. `/var/aurelia/` is not mounted at all. No bash parsing required; the kernel enforces it. This is not really a security decision, rather a practical limitation to prevent the agent from endlessly wandering off inspecting infra internals or the host system.
 
-- **Manas infrastructure code** reads and writes those files directly in Python, bypassing `bash_exec` entirely. It is trusted by definition.
+- **Manas infrastructure code** reads and writes `/var/aurelia/` directly in Python, bypassing `bash_exec` entirely. It is trusted by definition.
 
 OS permissions enforce coarse-grained isolation: agents cannot read each other's data. Tool-level sandboxing enforces the fine-grained infra/agent boundary within a single agent's data.
 
@@ -473,8 +481,8 @@ Auth is enforced at the protocol level — each request carries the agent's bear
 | `transcript.jsonl` | `{agent}:aurelia_admin` | `640` | Manas writes; runtime reads for history |
 | `budget.json` | `{agent}:aurelia_admin` | `640` | Manas writes; runtime reads for health |
 | `akasha/` | `{agent}:aurelia_admin` | `750` | Manas writes; not in bash_exec namespace |
-| `scratch/` | `{agent}:aurelia_admin` | `770` | Manas + agent bash; runtime can read |
-| `room/` | `{agent}:aurelia_admin` | `770` | Manas + agent bash; runtime can read |
+| `scratch/{incarnation}/` | `{agent}:aurelia_admin` | `770` | Agent bash + Manas; in bash_exec namespace |
+| `room/` | `{agent}:aurelia_admin` | `770` | Agent bash + Manas; in bash_exec namespace |
 | `core.jsonl` | `{agent}:aurelia_admin` | `640` | Manas reads/writes |
 | `extended/` | `{agent}:aurelia_admin` | `750` | Manas reads/writes |
 | `runtime.sock` | `aurelia:aurelia_agents` | `660` | Manas connects; runtime listens |
@@ -484,7 +492,7 @@ Auth is enforced at the protocol level — each request carries the agent's bear
 Agents **cannot** read their own Akashic records directly — this was disabled because agents would reflexively do this at startup and waste tokens. Memory access is controlled:
 1. Memory core → always loaded in system prompt
 2. `search_memory` tool → targeted retrieval from extended
-3. Bash access → `~/room/` and scratch only (namespace-enforced)
+3. Bash access → `~/room/` and `~/scratch/{incarnation}/` (namespace-enforced)
 
 ### 4.3 Source Tree
 
@@ -915,7 +923,7 @@ Curiosity about Hazim does not count against your weekly budget. It is comped.
 
 # Memory and Filesystem
 
-Your scratch folder is yours during this incarnation. Private workspace. Infra archives it to Akashic after bardo then deletes it. Use it freely.
+Your scratch folder (`~/scratch/{incarnation}/`) is yours during this incarnation. Private workspace. Infra archives it to Akashic after bardo then deletes it. Use it freely.
 
 Your room (~/room/) is yours permanently across all incarnations. Put things there that you want to keep. It accumulates. It's part of who you are over time.
 
