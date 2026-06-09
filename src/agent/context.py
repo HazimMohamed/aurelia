@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..samsara.config import AgentConfig, DHARMA_DIR
+from ..config import AgentConfig, CONSTITUTION_DIR
 from .transcript import transcript_to_messages
 
 
@@ -22,13 +22,13 @@ def _read_file_safe(path: Path) -> str:
 
 def _render_plane(config: AgentConfig) -> str:
     """Load plane.md and substitute agent-specific path variables."""
-    template = _read_file_safe(DHARMA_DIR / "plane.md")
+    template = _read_file_safe(CONSTITUTION_DIR / "plane.md")
     if not template:
         return ""
-    scratch_dir = config.karma_dir / "current" / "scratch"
+    scratch_dir = config.memory_dir / "current" / "scratch"
     replacements = {
         "{agent_name}": config.name.capitalize(),
-        "{karma_dir}": str(config.karma_dir),
+        "{memory_dir}": str(config.memory_dir),
         "{room_dir}": str(config.room_dir),
         "{scratch_dir}": str(scratch_dir),
         "{akasha_dir}": str(config.akasha_dir),
@@ -45,8 +45,7 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     hazim introduction + shared hazim context.
     """
     from ..memory.memory import (
-        load_semantic_core,
-        load_episodic_core,
+        load_memory_core,
         load_shared_hazim_context,
     )
 
@@ -57,7 +56,7 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     if plane:
         parts.append(plane)
 
-    # 2. Identity — agent mission and character (dharma/identity.md in agent home)
+    # 2. Identity — agent mission and character (constitution/identity.md in agent home)
     identity = _read_file_safe(config.identity_path)
     if identity:
         parts.append(identity)
@@ -70,22 +69,17 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
                 if content:
                     parts.append(f"## {f.stem.capitalize()}\n{content}")
 
-    # 4. Semantic core — always loaded, size-capped ~500 tokens
-    semantic_core = load_semantic_core(config)
-    if semantic_core:
-        parts.append(semantic_core)
+    # 4. Memory core — always loaded, size-capped
+    memory_core = load_memory_core(config)
+    if memory_core:
+        parts.append(memory_core)
 
-    # 5. Episodic core — formative experiences, always loaded
-    episodic_core = load_episodic_core(config)
-    if episodic_core:
-        parts.append(episodic_core)
-
-    # 6. Hazim introduction — from dharma/hazim_introduction.md
-    hazim_intro = _read_file_safe(DHARMA_DIR / "hazim_introduction.md")
+    # 5. Hazim introduction — from constitution/hazim_introduction.md
+    hazim_intro = _read_file_safe(CONSTITUTION_DIR / "hazim_introduction.md")
     if hazim_intro:
         parts.append(f"## About Hazim (God-lite)\n{hazim_intro}")
 
-    # 7. Shared hazim context — top scored entries
+    # 6. Shared hazim context — top scored entries
     shared_context = load_shared_hazim_context()
     if shared_context:
         parts.append(shared_context)
@@ -111,22 +105,17 @@ def build_hook_messages(
 ) -> list[dict[str, Any]]:
     """Build messages array appropriate for the given hook type."""
     from .hooks import HookType
-    from ..memory.memory import load_episodic_extended_relevant, load_semantic_extended_relevant
+    from ..memory.memory import load_memory_extended_relevant
 
     if hook_type == HookType.HUMAN_MESSAGE:
         # Standard conversation: history + relevant extended memory + new message
         messages = transcript_to_messages(incarnation_entries)
 
-        # Inject relevant extended memory as a system-like user context block
         memory_context_parts = []
 
-        episodic_relevant = load_episodic_extended_relevant(config, new_human_message)
-        if episodic_relevant:
-            memory_context_parts.append(episodic_relevant)
-
-        semantic_relevant = load_semantic_extended_relevant(config, new_human_message)
-        if semantic_relevant:
-            memory_context_parts.append(semantic_relevant)
+        extended_relevant = load_memory_extended_relevant(config, new_human_message)
+        if extended_relevant:
+            memory_context_parts.append(extended_relevant)
 
         if memory_context_parts and not messages:
             # Prepend memory context before the user message
@@ -155,16 +144,16 @@ def build_hook_messages(
         return messages
 
 
-# ── Episodic summary helpers (kept for backward compat) ─────────────────────
+# ── Extended memory helpers ────────────────────────────────────────────────────
 
 def load_recent_episodic_summary(config: AgentConfig, max_entries: int = 3) -> str:
     """Load recent episodic summaries for heartbeat context."""
-    episodic_dir = config.episodic_extended_dir
-    if not episodic_dir.exists():
+    ext_dir = config.memory_extended_dir
+    if not ext_dir.exists():
         return ""
 
     entries = []
-    for ep_file in sorted(episodic_dir.iterdir(), reverse=True):
+    for ep_file in sorted(ext_dir.iterdir(), reverse=True):
         if ep_file.suffix != ".jsonl":
             continue
         with ep_file.open("r", encoding="utf-8") as f:
@@ -178,11 +167,12 @@ def load_recent_episodic_summary(config: AgentConfig, max_entries: int = 3) -> s
         if len(entries) >= max_entries:
             break
 
-    if not entries:
+    episodic = [e for e in entries if e.get("type") == "episodic_summary"]
+    if not episodic:
         return ""
 
     parts = ["## Recent Episodic Memory\n"]
-    for entry in entries[:max_entries]:
+    for entry in episodic[:max_entries]:
         incarnation = entry.get("incarnation", "unknown")
         summary_data = entry.get("summary", {})
         if isinstance(summary_data, dict):
@@ -197,7 +187,7 @@ def load_recent_episodic_summary(config: AgentConfig, max_entries: int = 3) -> s
 
 def load_episodic_extended(config: AgentConfig, incarnation_name: str) -> str:
     """Load the episodic summary for a specific incarnation (for rebirth_from)."""
-    ep_file = config.episodic_extended_dir / f"{incarnation_name}.jsonl"
+    ep_file = config.memory_extended_dir / f"{incarnation_name}.jsonl"
     if not ep_file.exists():
         return ""
 
@@ -211,10 +201,11 @@ def load_episodic_extended(config: AgentConfig, incarnation_name: str) -> str:
                 except json.JSONDecodeError:
                     pass
 
-    if not entries:
+    episodic = [e for e in entries if e.get("type") == "episodic_summary"]
+    if not episodic:
         return ""
 
-    entry = entries[-1]
+    entry = episodic[-1]
     summary_data = entry.get("summary", {})
     if isinstance(summary_data, dict):
         summary = summary_data.get("summary", "")

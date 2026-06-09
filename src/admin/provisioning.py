@@ -6,7 +6,7 @@ Single source of truth for standing up an Aurelia agent on disk:
     create_ephemeral_agent()  — temporary experiment agent (exp-{base}-{hex})
     destroy_ephemeral_agent() — full teardown of an ephemeral agent
 
-Constitutions are loaded from aurelia/dharma/{name}.md, not hardcoded here.
+Constitutions are loaded from aurelia/constitution/{name}.md, not hardcoded here.
 
 Requires root privileges (useradd / userdel / chown).
 
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import (
+from ..config import (
     AGENT_HOME_BASE,
     AGENT_DATA_BASE,
     AGENT_RUN_BASE,
@@ -37,19 +37,19 @@ from .config import (
 )
 from ..agent.budget import _get_week_start
 
-_DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
+_CONSTITUTION_DIR = Path(__file__).parent.parent.parent / "constitution"
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
 
-# ── Seed karma ─────────────────────────────────────────────────────────────────
+# ── Seed memory ────────────────────────────────────────────────────────────────
 
 
 @dataclass
 class SeedKarma:
     """Artificial memory to inject before an agent's first cycle."""
 
-    semantic_core: list[dict] = field(default_factory=list)
-    episodic: list[dict] = field(default_factory=list)
+    memory_core: list[dict] = field(default_factory=list)
+    episodes: list[dict] = field(default_factory=list)
     room_files: dict[str, str] = field(default_factory=dict)
 
 
@@ -69,7 +69,7 @@ class EphemeralAgent:
 
 def load_constitution(agent_name: str, custom: str | None = None) -> str:
     """
-    Load identity for agent_name from aurelia/dharma/{agent_name}.md.
+    Load identity for agent_name from aurelia/constitution/{agent_name}.md.
     This is the agent's mission and character — not the plane mechanics.
     Falls back to a minimal default if the file doesn't exist.
     custom overrides everything.
@@ -77,7 +77,7 @@ def load_constitution(agent_name: str, custom: str | None = None) -> str:
     if custom:
         return custom
 
-    path = _DHARMA_DIR / f"{agent_name}.md"
+    path = _CONSTITUTION_DIR / f"{agent_name}.md"
     if path.exists():
         return path.read_text(encoding="utf-8")
 
@@ -108,27 +108,22 @@ def _setup_filesystem(
     overwrite: bool = False,
 ) -> None:
     # Agent-owned workspace
-    for d in ["identity", "room", "dharma"]:
+    for d in ["identity", "room", "constitution"]:
         (home / d).mkdir(parents=True, exist_ok=True)
 
-    # Samsara-managed data
-    for d in [
-        "memory/episodic/core",
-        "memory/episodic/extended",
-        "memory/semantic/extended",
-        "akasha",
-    ]:
+    # Runtime-managed data
+    for d in ["memory/extended", "akasha"]:
         (data_dir / d).mkdir(parents=True, exist_ok=True)
 
-    semantic_core = data_dir / "memory/semantic/core.jsonl"
-    if not semantic_core.exists():
-        semantic_core.touch()
+    memory_core = data_dir / "memory/core.jsonl"
+    if not memory_core.exists():
+        memory_core.touch()
 
     def write(path: Path, content: str) -> None:
         if overwrite or not path.exists():
             path.write_text(content, encoding="utf-8")
 
-    write(home / "dharma/identity.md", constitution)
+    write(home / "constitution/identity.md", constitution)
 
     write(
         data_dir / "agent.json",
@@ -177,23 +172,23 @@ def _setup_filesystem(
 def _inject_seed_karma(home: Path, data_dir: Path, agent_name: str, seed: SeedKarma) -> None:
     ts = datetime.now(timezone.utc).isoformat()
 
-    if seed.semantic_core:
-        core_path = data_dir / "memory/semantic/core.jsonl"
+    if seed.memory_core:
+        core_path = data_dir / "memory/core.jsonl"
         with core_path.open("a", encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
             try:
-                for entry in seed.semantic_core:
+                for entry in seed.memory_core:
                     entry.setdefault("ts", ts)
                     entry.setdefault("type", "memory_flag")
-                    entry.setdefault("tier", "semantic_core")
+                    entry.setdefault("tier", "core")
                     f.write(json.dumps(entry) + "\n")
             finally:
                 fcntl.flock(f, fcntl.LOCK_UN)
 
-    if seed.episodic:
-        path = data_dir / "memory/episodic/extended" / f"{agent_name}-seed.jsonl"
+    if seed.episodes:
+        path = data_dir / "memory/extended" / f"{agent_name}-seed.jsonl"
         with path.open("w", encoding="utf-8") as f:
-            for entry in seed.episodic:
+            for entry in seed.episodes:
                 entry.setdefault("ts", ts)
                 entry.setdefault("type", "episodic_summary")
                 f.write(json.dumps(entry) + "\n")
@@ -291,11 +286,10 @@ def _create_linux_user(name: str) -> None:
         check=True,
         capture_output=True,
     )
-    for group in ("agent_group",):
-        try:
-            subprocess.run(["usermod", "-aG", group, name], check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            pass  # group may not exist in dev
+    try:
+        subprocess.run(["usermod", "-aG", "aurelia_agents", name], check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        pass  # group may not exist in dev
 
 
 def _destroy_linux_user(name: str) -> None:
@@ -310,17 +304,42 @@ def _chown(name: str, home: Path, data_dir: Path, run_dir: Path) -> None:
         if result.returncode != 0:
             print(f"[provisioning] WARNING: {' '.join(cmd)!r} failed: {result.stderr.decode().strip()}")
 
-    # Agent-owned workspace: agent + aurelia_admin, 770
-    _run(["chown", "-R", f"{name}:aurelia_admin", str(home)])
-    _run(["chmod", "-R", "770", str(home)])
+    # constitution/ and identity/ — world-readable; owned by aurelia service
+    for d in ("constitution", "identity"):
+        p = home / d
+        if p.exists():
+            _run(["chown", "-R", "aurelia:aurelia_admin", str(p)])
+            _run(["chmod", "-R", "644", str(p)])
+            _run(["chmod", "755", str(p)])  # directory itself needs x
 
-    # Agent data dir: agent owns it, aurelia_admin group for samsara/zuzu access
+    # room/ and scratch/ — agent + aurelia_admin, 770 (bash_exec writes here)
+    for d in ("room",):
+        p = home / d
+        if p.exists():
+            _run(["chown", "-R", f"{name}:aurelia_admin", str(p)])
+            _run(["chmod", "-R", "770", str(p)])
+
+    # data_dir tree — blanket chown first so root-created files get corrected
     _run(["chown", "-R", f"{name}:aurelia_admin", str(data_dir)])
-    _run(["chmod", "-R", "770", str(data_dir)])
 
-    # Agent-owned runtime state (Manas socket + pid): agent + aurelia_admin, 770
+    # data_dir and memory/ — 750 (agent rw, aurelia_admin r, others none)
+    for d in (data_dir, data_dir / "memory"):
+        if d.exists():
+            _run(["chmod", "750", str(d)])
+
+    # core.jsonl and budget.json — 640 (agent rw, aurelia_admin r)
+    for p in (data_dir / "memory" / "core.jsonl", data_dir / "budget.json"):
+        if p.exists():
+            _run(["chmod", "640", str(p)])
+
+    # akasha/ and extended/ — 750 (Manas rw, aurelia_admin r, not in bash_exec ns)
+    for d in (data_dir / "akasha", data_dir / "memory" / "extended"):
+        if d.exists():
+            _run(["chmod", "-R", "750", str(d)])
+
+    # run_dir — agent:aurelia_admin, setgid so manas.sock inherits aurelia_admin group
     _run(["chown", "-R", f"{name}:aurelia_admin", str(run_dir)])
-    _run(["chmod", "-R", "770", str(run_dir)])
+    _run(["chmod", "2750", str(run_dir)])  # setgid + 750
 
 
 MANAS_LAUNCHER = "/opt/aurelia/bin/manas-launch"
@@ -422,8 +441,8 @@ def create_agent(
 
     Args:
         name:         Agent name, e.g. "personal". Also used to look up the
-                      constitution at dharma/{name}.md.
-        constitution: Override the constitution. If None, loads from dharma/.
+                      constitution at constitution/{name}.md.
+        constitution: Override the constitution. If None, loads from constitution/.
         seed_karma:   Artificial memory to inject before the first cycle.
         model:        LLM model for the agent.
 
@@ -439,6 +458,8 @@ def create_agent(
         seed_karma=seed_karma,
         overwrite=False,
     )
+    # Re-run chown after standup — _setup_filesystem creates files as root
+    _chown(name, AGENT_HOME_BASE / name, AGENT_DATA_BASE / name, AGENT_RUN_BASE / name)
     return AgentConfig(name=name, model=model)
 
 
@@ -451,6 +472,29 @@ def destroy_agent(name: str) -> None:
     for d in (AGENT_HOME_BASE / name, AGENT_DATA_BASE / name, AGENT_RUN_BASE / name):
         if d.exists():
             shutil.rmtree(d)
+
+
+def reset_agent(
+    name: str,
+    model: str = MODEL_SONNET,
+    constitution: str | None = None,
+) -> AgentConfig:
+    """Destroy and recreate an agent from scratch — all memory wiped, identity reseeded.
+
+    Returns the new AgentConfig. Caller must trigger a runtime registry reload.
+    """
+    destroy_agent(name)
+    _provision(name)
+    _standup_agent(
+        name=name,
+        display_name=name.capitalize(),
+        constitution=load_constitution(name, constitution),
+        model=model,
+        seed_karma=None,
+        overwrite=True,
+    )
+    _chown(name, AGENT_HOME_BASE / name, AGENT_DATA_BASE / name, AGENT_RUN_BASE / name)
+    return AgentConfig(name=name, model=model)
 
 
 def create_ephemeral_agent(
@@ -467,7 +511,7 @@ def create_ephemeral_agent(
 
     Args:
         base_agent:   Agent type to mirror ("personal", "cooking", etc.).
-                      Used to load the constitution from dharma/.
+                      Used to load the constitution from constitution/.
         constitution: Override the constitution.
         seed_karma:   Artificial memory to inject before the first cycle.
         model:        LLM model for the agent.
@@ -485,6 +529,7 @@ def create_ephemeral_agent(
         seed_karma=seed_karma,
         overwrite=True,
     )
+    _chown(name, AGENT_HOME_BASE / name, AGENT_DATA_BASE / name, AGENT_RUN_BASE / name)
     config = AgentConfig(name=name, model=model, description=f"Ephemeral: {base_agent}")
     return EphemeralAgent(name=name, base_agent=base_agent, config=config, token=token)
 

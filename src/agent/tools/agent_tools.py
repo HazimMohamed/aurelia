@@ -255,20 +255,16 @@ CONFIG_UPDATE_SCHEMA = {
 
 def handle_registry_reload(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     """Reload the agent registry. Janitor-only."""
-    api_url = ctx.get("api_url", "http://localhost:8000")
+    from ...runtime.socket_client import send_runtime_request
     try:
-        import httpx
-        response = httpx.post(f"{api_url}/internal/registry/reload", timeout=10.0)
-        if response.status_code == 200:
-            return {"status": "reloaded", "message": "Agent registry reloaded."}
-        return {"error": f"Registry reload failed: HTTP {response.status_code}"}
+        return send_runtime_request({"type": "registry_reload"})
     except Exception as e:
         return {"error": f"Registry reload failed: {e}"}
 
 
 def handle_config_update(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
     """Update config.json at a dot-separated path. Janitor-only. Logged."""
-    from ...samsara.config import GLOBAL_CONFIG_PATH
+    from ...config import GLOBAL_CONFIG_PATH
 
     agent_config = ctx.get("agent_config")
     incarnation_state = ctx.get("incarnation_state")
@@ -329,13 +325,11 @@ def register_agent_tools(
     agent_name: str,
     agent_config: Any = None,
     incarnation_state: dict[str, Any] = None,
-    api_url: str = "http://localhost:8000",
 ) -> None:
     """Register agent-specific tools based on agent name."""
     ctx = {
         "agent_config": agent_config,
         "incarnation_state": incarnation_state,
-        "api_url": api_url,
     }
 
     def make_handler(fn):

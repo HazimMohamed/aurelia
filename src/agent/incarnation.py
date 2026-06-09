@@ -11,7 +11,7 @@ from typing import Optional
 
 import anthropic
 
-from ..samsara.config import AgentConfig, MODEL_HAIKU
+from ..config import AgentConfig, MODEL_HAIKU
 from .transcript import (
     read_entries,
     write_incarnation_start,
@@ -19,23 +19,23 @@ from .transcript import (
 )
 
 
-def _get_existing_incarnation_names(karma_dir: Path) -> list[str]:
-    """Return all incarnation directory names under karma/."""
+def _get_existing_incarnation_names(memory_dir: Path) -> list[str]:
+    """Return all incarnation directory names under memory/."""
     names = []
-    if not karma_dir.exists():
+    if not memory_dir.exists():
         return names
-    for entry in karma_dir.iterdir():
-        # Skip 'primary' symlink, 'episodic', 'semantic' dirs
-        if entry.name in ("primary", "episodic", "semantic"):
+    for entry in memory_dir.iterdir():
+        if entry.name in ("primary", "extended"):
             continue
-        if entry.is_dir():
-            names.append(entry.name)
+        if not entry.is_dir():
+            continue
+        names.append(entry.name)
     return names
 
 
-def generate_incarnation_name(agent_name: str, karma_dir: Path) -> str:
+def generate_incarnation_name(agent_name: str, memory_dir: Path) -> str:
     """Call Haiku to generate a unique adjective-noun pair, then build full name."""
-    existing = _get_existing_incarnation_names(karma_dir)
+    existing = _get_existing_incarnation_names(memory_dir)
     existing_str = ", ".join(existing) if existing else "none"
 
     client = anthropic.Anthropic()
@@ -81,7 +81,7 @@ def get_primary_incarnation(config: AgentConfig) -> Optional[str]:
 
 def set_primary_incarnation(config: AgentConfig, name: str) -> None:
     """Point the primary symlink at the named incarnation directory."""
-    incarnation_dir = config.karma_dir / name
+    incarnation_dir = config.memory_dir / name
     if not incarnation_dir.exists():
         raise ValueError(f"Incarnation '{name}' not found for agent '{config.name}'")
     symlink = config.primary_symlink
@@ -92,8 +92,8 @@ def set_primary_incarnation(config: AgentConfig, name: str) -> None:
 
 def spawn_incarnation(config: AgentConfig, make_primary: bool = False) -> str:
     """Create a new incarnation directory, write start entry, optionally set as primary."""
-    incarnation_name = generate_incarnation_name(config.name, config.karma_dir)
-    incarnation_dir = config.karma_dir / incarnation_name
+    incarnation_name = generate_incarnation_name(config.name, config.memory_dir)
+    incarnation_dir = config.memory_dir / incarnation_name
     scratch_dir = incarnation_dir / "scratch"
 
     incarnation_dir.mkdir(parents=True, exist_ok=True)
@@ -117,7 +117,7 @@ def spawn_incarnation(config: AgentConfig, make_primary: bool = False) -> str:
 
 def load_incarnation(config: AgentConfig, incarnation_name: str) -> dict:
     """Load incarnation state: transcript entries and current cycle count."""
-    incarnation_dir = config.karma_dir / incarnation_name
+    incarnation_dir = config.memory_dir / incarnation_name
     transcript_path = incarnation_dir / "transcript.jsonl"
     entries = read_entries(transcript_path)
 
@@ -144,7 +144,7 @@ def get_or_spawn_incarnation(config: AgentConfig) -> dict:
 
 def get_incarnation_by_id(config: AgentConfig, incarnation_id: str) -> dict:
     """Load a specific incarnation by name. Raises ValueError if not found."""
-    incarnation_dir = config.karma_dir / incarnation_id
+    incarnation_dir = config.memory_dir / incarnation_id
     if not incarnation_dir.exists():
         raise ValueError(f"Incarnation '{incarnation_id}' not found for agent '{config.name}'")
     return load_incarnation(config, incarnation_id)

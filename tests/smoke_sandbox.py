@@ -23,7 +23,7 @@ from src.sandbox.sandbox import (
     acquire_sandbox_agent,
     release_sandbox_agent,
 )
-from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE, GLOBAL_CONFIG_PATH
+from src.config import AGENT_HOME_BASE, AGENT_DATA_BASE, GLOBAL_CONFIG_PATH
 
 W = 60
 
@@ -50,7 +50,7 @@ check("lock file is open", agent._lock_file is not None)
 home = AGENT_HOME_BASE / agent.name
 data_dir = AGENT_DATA_BASE / agent.name
 check("home dir exists", home.is_dir(), str(home))
-check("dharma/identity.md written", (home / "dharma/identity.md").exists())
+check("constitution/identity.md written", (home / "constitution/identity.md").exists())
 check("data_dir exists", data_dir.is_dir(), str(data_dir))
 check("agent.json written to data_dir", (data_dir / "agent.json").exists())
 check("memory/semantic/core.jsonl exists", (data_dir / "memory/semantic/core.jsonl").exists())

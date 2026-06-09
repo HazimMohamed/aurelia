@@ -12,9 +12,8 @@ INVITE_AGENT_SCHEMA = {
     "name": "invite_agent",
     "description": (
         "Invite another agent to connect and work on a task with you. "
-        "This triggers a forced bardo on their active incarnation first, then "
-        "sends them an invitation as a scheduled task. The other agent will wake up "
-        "and can accept or decline via answer_phone."
+        "A fresh incarnation of the target agent is spawned — their primary conversation "
+        "is left undisturbed. The invited agent can accept or decline via answer_phone."
     ),
     "input_schema": {
         "type": "object",
@@ -60,11 +59,9 @@ ANSWER_PHONE_SCHEMA = {
 
 
 def handle_invite_agent(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
-    """Invite another agent: trigger forced bardo, then write invitation to their queue."""
-    import json
-    import httpx
-    from pathlib import Path
-    from ...samsara.config import AGENT_HOME_BASE
+    """Invite another agent: schedule an agent_invite hook on a fresh non-primary incarnation."""
+    from ...config import AGENT_DATA_BASE
+    from ...runtime.socket_client import send_runtime_request
 
     target_agent = input_data.get("agent", "")
     task = input_data.get("task", "")
@@ -73,71 +70,43 @@ def handle_invite_agent(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
     agent_config = ctx.get("agent_config")
     incarnation_state = ctx.get("incarnation_state")
-    api_url = ctx.get("api_url", "http://localhost:8000")
 
     if not target_agent:
         return {"error": "agent is required"}
     if not task:
         return {"error": "task is required"}
 
-    # Lazy FS read: verify agent exists
-    agent_dir = AGENT_HOME_BASE / target_agent
-    if not agent_dir.exists() or not (agent_dir / "agent.json").exists():
-        return {"error": f"Agent '{target_agent}' not found in {AGENT_HOME_BASE}"}
+    agent_dir = AGENT_DATA_BASE / target_agent
+    if not agent_dir.exists():
+        return {"error": f"Agent '{target_agent}' not found"}
 
     invitation_id = str(uuid.uuid4())
     from_agent = agent_config.name if agent_config else "unknown"
     incarnation_name = incarnation_state["name"] if incarnation_state else "unknown"
 
-    # Step 1: Trigger forced bardo on target's active incarnation
     try:
-        bardo_response = httpx.post(
-            f"{api_url}/internal/bardo/{target_agent}",
-            json={"reason": "agent_invite", "forced": True},
-            timeout=60.0,
-        )
-        # Bardo failure is non-fatal — agent might not have an active incarnation
-        if bardo_response.status_code not in (200, 404, 409):
-            print(f"[invite_agent] Bardo warning for {target_agent}: {bardo_response.status_code}")
-    except Exception as e:
-        print(f"[invite_agent] Bardo attempt failed for {target_agent}: {e}")
-
-    # Step 2: Schedule the invitation as an agent_invite task
-    try:
-        schedule_response = httpx.post(
-            f"{api_url}/internal/schedule",
-            json={
-                "agent": target_agent,
-                "goal": task,
-                "when": "now",
-                "type": "agent_invite",
-                "recurring": False,
-                "created_by": incarnation_name,
-                "payload": {
-                    "invitation_id": invitation_id,
-                    "from_agent": from_agent,
-                    "from_incarnation": incarnation_name,
-                    "task": task,
-                    "context": context,
-                    "optional": optional,
-                },
-            },
-            headers={
-                "Authorization": f"Bearer {_load_agent_token(from_agent)}",
-            },
-            timeout=30.0,
-        )
-
-        if schedule_response.status_code == 200:
-            return {
-                "status": "invited",
+        send_runtime_request({
+            "type": "schedule",
+            "agent": target_agent,
+            "goal": task,
+            "schedule_type": "agent_invite",
+            "trigger_time": None,
+            "recurring": False,
+            "created_by": incarnation_name,
+            "payload": {
                 "invitation_id": invitation_id,
-                "target_agent": target_agent,
-                "message": f"Invitation sent to {target_agent}. They will respond via answer_phone.",
-            }
+                "from_agent": from_agent,
+                "from_incarnation": incarnation_name,
+                "task": task,
+                "context": context,
+                "optional": optional,
+            },
+        })
         return {
-            "error": f"Failed to schedule invitation: HTTP {schedule_response.status_code}",
+            "status": "invited",
             "invitation_id": invitation_id,
+            "target_agent": target_agent,
+            "message": f"Invitation sent to {target_agent}. They will respond via answer_phone.",
         }
     except Exception as e:
         return {"error": f"Failed to send invitation: {e}", "invitation_id": invitation_id}
@@ -153,7 +122,6 @@ def handle_answer_phone(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
     agent_config = ctx.get("agent_config")
     incarnation_state = ctx.get("incarnation_state")
-    api_url = ctx.get("api_url", "http://localhost:8000")
 
     if not invitation_id:
         return {"error": "invitation_id is required"}
@@ -184,13 +152,11 @@ def register_comms_tools(
     registry: ToolRegistry,
     agent_config: Any,
     incarnation_state: dict[str, Any],
-    api_url: str,
 ) -> None:
     """Register communication tools into the registry."""
     ctx = {
         "agent_config": agent_config,
         "incarnation_state": incarnation_state,
-        "api_url": api_url,
     }
 
     def make_handler(fn):
@@ -202,19 +168,3 @@ def register_comms_tools(
     registry.register(INVITE_AGENT_SCHEMA, make_handler(handle_invite_agent))
     registry.register(ANSWER_PHONE_SCHEMA, make_handler(handle_answer_phone))
 
-
-def _load_agent_token(agent_name: str) -> str:
-    """Load the agent's bearer token for API auth."""
-    import json
-    from ...samsara.config import GLOBAL_CONFIG_PATH
-
-    try:
-        if GLOBAL_CONFIG_PATH.exists():
-            with GLOBAL_CONFIG_PATH.open() as f:
-                cfg = json.load(f)
-            agents_cfg = cfg.get("agents", {})
-            agent_cfg = agents_cfg.get(agent_name, {})
-            return agent_cfg.get("token", "")
-    except (json.JSONDecodeError, OSError):
-        pass
-    return ""

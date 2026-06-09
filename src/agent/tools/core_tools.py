@@ -1,4 +1,4 @@
-"""Core tools: continue_task, memory_write, schedule_task, log_note, list_tools."""
+"""Core tools: memory_write, schedule_task, log_note, list_tools."""
 
 from __future__ import annotations
 
@@ -10,23 +10,12 @@ from .registry import ToolRegistry
 
 # ── Tool schemas ───────────────────────────────────────────────────────────────
 
-CONTINUE_TASK_SCHEMA = {
-    "name": "continue_task",
-    "description": (
-        "Continue to the next cycle of this incarnation. Use when you have more work "
-        "to do in this same session. The infrastructure will loop and call you again "
-        "with the same context."
-    ),
-    "input_schema": {"type": "object", "properties": {}, "required": []},
-}
-
 MEMORY_WRITE_SCHEMA = {
     "name": "memory_write",
     "description": (
         "Flag something for memory. Apply the six-month test: would this still matter "
-        "in six months? Use tier: semantic_core for critical always-in-context facts. "
-        "semantic_core writes are immediate (before bardo). "
-        "semantic writes go to extended and are processed by bardo. "
+        "in six months? Use tier: core for critical always-in-context facts (size-capped, written immediately). "
+        "Use tier: extended for useful-but-not-critical knowledge (written on demand by category). "
         "Use shared_context_write instead if all agents would benefit."
     ),
     "input_schema": {
@@ -40,12 +29,12 @@ MEMORY_WRITE_SCHEMA = {
             },
             "tier": {
                 "type": "string",
-                "enum": ["episodic", "semantic", "semantic_core"],
-                "description": "Memory tier: episodic (this life), semantic (general), semantic_core (always loaded)",
+                "enum": ["core", "extended"],
+                "description": "Memory tier: core (always in context, size-capped), extended (retrievable on demand)",
             },
             "category": {
                 "type": "string",
-                "description": "Optional category tag for this memory (e.g. preferences, patterns, facts)",
+                "description": "Optional category tag for extended tier (e.g. preferences, patterns, facts)",
             },
         },
         "required": ["content", "importance"],
@@ -155,37 +144,10 @@ SHARED_CONTEXT_WRITE_SCHEMA = {
     },
 }
 
-SEARCH_EPISODIC_SCHEMA = {
-    "name": "search_episodic",
-    "description": (
-        "Search your episodic memory for relevant past experiences. "
-        "Keyword search across your episodic/extended/ history. "
-        "Use when you want to recall specific past events or conversations."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "Keywords to search for"},
-            "limit": {
-                "type": "integer",
-                "description": "Maximum number of results to return (default: 5)",
-                "default": 5,
-            },
-        },
-        "required": ["query"],
-    },
-}
-
-
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
-def handle_continue_task(input_data: dict[str, Any], **ctx: Any) -> None:
-    """continue_task returns None — infrastructure handles the loop."""
-    return None
-
-
 def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
-    """Write a memory flag to transcript and immediately to semantic core if tier=semantic_core."""
+    """Write a memory flag to transcript; immediately persist core-tier writes."""
     from datetime import datetime, timezone
 
     agent_config = ctx.get("agent_config")
@@ -193,7 +155,7 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
     content = input_data.get("content", "")
     importance = input_data.get("importance", "medium")
-    tier = input_data.get("tier", "episodic")
+    tier = input_data.get("tier", "extended")
     category = input_data.get("category", "general") or "general"
 
     if not content:
@@ -210,40 +172,37 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
         "incarnation": incarnation_state["name"] if incarnation_state else "",
     }
 
-    # Write memory flag to transcript
     if incarnation_state:
         from ..transcript import append_entry
         append_entry(incarnation_state["transcript_path"], entry)
 
-    # Immediate write to semantic core if tier=semantic_core (Path 1)
-    if tier == "semantic_core" and agent_config:
+    if tier == "core" and agent_config:
         try:
-            from ...memory.memory import write_semantic_core
-            write_semantic_core(agent_config, entry)
+            from ...memory.memory import write_memory_core
+            write_memory_core(agent_config, entry)
             return {
                 "status": "written",
                 "tier": tier,
                 "importance": importance,
-                "message": "Written to semantic core immediately (always loaded).",
+                "message": "Written to memory/core.jsonl (always loaded).",
             }
         except Exception as e:
             return {
                 "status": "flagged",
                 "tier": tier,
                 "importance": importance,
-                "message": f"Flagged to transcript; semantic core write failed: {e}",
+                "message": f"Flagged to transcript; core write failed: {e}",
             }
 
-    # For semantic extended — also write immediately
-    if tier == "semantic" and agent_config:
+    if tier == "extended" and agent_config:
         try:
-            from ...memory.memory import write_semantic_extended
-            write_semantic_extended(agent_config, category, entry)
+            from ...memory.memory import write_memory_extended
+            write_memory_extended(agent_config, category, entry)
             return {
                 "status": "written",
                 "tier": tier,
                 "importance": importance,
-                "message": f"Written to semantic/extended/{category}.jsonl.",
+                "message": f"Written to memory/extended/{category}.jsonl.",
             }
         except Exception as e:
             pass  # Bardo will catch it from transcript
@@ -257,12 +216,12 @@ def handle_memory_write(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any
 
 
 def handle_schedule_task(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
-    """Schedule a future incarnation via the scheduler API."""
-    import httpx
+    """Schedule a future incarnation via the runtime socket."""
+    from ...runtime.socket_client import send_runtime_request
+    from ...runtime.scheduler import _parse_when
 
     agent_config = ctx.get("agent_config")
     incarnation_state = ctx.get("incarnation_state")
-    api_url = ctx.get("api_url", "http://localhost:8000")
 
     goal = input_data.get("goal", "")
     when = input_data.get("when", "1h")
@@ -273,33 +232,25 @@ def handle_schedule_task(input_data: dict[str, Any], **ctx: Any) -> dict[str, An
 
     if not goal:
         return {"error": "goal is required"}
-
     if not agent_config:
         return {"error": "no agent_config in context"}
 
     incarnation_name = incarnation_state["name"] if incarnation_state else "unknown"
+    trigger_dt = _parse_when(when)
+    trigger_time = trigger_dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
     try:
-        response = httpx.post(
-            f"{api_url}/internal/schedule",
-            json={
-                "agent": agent_config.name,
-                "goal": goal,
-                "when": when,
-                "type": task_type,
-                "recurring": recurring,
-                "interval_hours": interval_hours,
-                "rebirth_from": rebirth_from,
-                "created_by": incarnation_name,
-            },
-            headers={
-                "Authorization": f"Bearer {_load_agent_token(agent_config.name)}",
-            },
-            timeout=30.0,
-        )
-        if response.status_code == 200:
-            return response.json()
-        return {"error": f"Scheduler returned HTTP {response.status_code}: {response.text[:200]}"}
+        return send_runtime_request({
+            "type": "schedule",
+            "agent": agent_config.name,
+            "goal": goal,
+            "schedule_type": task_type,
+            "trigger_time": trigger_time,
+            "recurring": recurring,
+            "interval_hours": interval_hours,
+            "rebirth_from": rebirth_from,
+            "created_by": incarnation_name,
+        })
     except Exception as e:
         return {"error": f"Failed to schedule task: {e}"}
 
@@ -418,64 +369,17 @@ def handle_shared_context_write(input_data: dict[str, Any], **ctx: Any) -> dict[
         return {"error": f"Failed to write shared context: {e}"}
 
 
-def handle_search_episodic(input_data: dict[str, Any], **ctx: Any) -> dict[str, Any]:
-    """Keyword search across episodic/extended memory."""
-    agent_config = ctx.get("agent_config")
-
-    query = input_data.get("query", "")
-    limit = input_data.get("limit", 5)
-
-    if not query:
-        return {"error": "query is required"}
-
-    if not agent_config:
-        return {"error": "no agent_config in context"}
-
-    try:
-        from ...memory.memory import search_episodic
-        results = search_episodic(agent_config, query, limit=limit)
-
-        formatted = []
-        for entry in results:
-            incarnation = entry.get("incarnation", "unknown")
-            ts = entry.get("ts", "")
-            summary_data = entry.get("summary", {})
-            if isinstance(summary_data, dict):
-                summary = summary_data.get("summary", "")
-                topics = summary_data.get("topics", [])
-            else:
-                summary = str(summary_data)
-                topics = []
-
-            formatted.append({
-                "incarnation": incarnation,
-                "ts": ts,
-                "summary": summary,
-                "topics": topics,
-            })
-
-        return {
-            "query": query,
-            "results": formatted,
-            "count": len(formatted),
-        }
-    except Exception as e:
-        return {"error": f"Search failed: {e}"}
-
-
 # ── Registration ───────────────────────────────────────────────────────────────
 
 def register_core_tools(
     registry: ToolRegistry,
     agent_config: Any,
     incarnation_state: dict[str, Any],
-    api_url: str,
 ) -> None:
     """Register all core tools into the registry."""
     ctx = {
         "agent_config": agent_config,
         "incarnation_state": incarnation_state,
-        "api_url": api_url,
     }
 
     def make_handler(fn):
@@ -484,28 +388,9 @@ def register_core_tools(
             return fn(input_data, **merged)
         return handler
 
-    registry.register(CONTINUE_TASK_SCHEMA, make_handler(handle_continue_task))
     registry.register(MEMORY_WRITE_SCHEMA, make_handler(handle_memory_write))
     registry.register(SCHEDULE_TASK_SCHEMA, make_handler(handle_schedule_task))
     registry.register(LOG_NOTE_SCHEMA, make_handler(handle_log_note))
     registry.register(LIST_TOOLS_SCHEMA, make_handler(handle_list_tools))
     registry.register(DASHBOARD_NOTIFICATION_SCHEMA, make_handler(handle_dashboard_notification))
     registry.register(SHARED_CONTEXT_WRITE_SCHEMA, make_handler(handle_shared_context_write))
-    registry.register(SEARCH_EPISODIC_SCHEMA, make_handler(handle_search_episodic))
-
-
-def _load_agent_token(agent_name: str) -> str:
-    """Load the agent's bearer token for API auth."""
-    import json
-    from ...samsara.config import GLOBAL_CONFIG_PATH
-
-    try:
-        if GLOBAL_CONFIG_PATH.exists():
-            with GLOBAL_CONFIG_PATH.open() as f:
-                cfg = json.load(f)
-            agents_cfg = cfg.get("agents", {})
-            agent_cfg = agents_cfg.get(agent_name, {})
-            return agent_cfg.get("token", "")
-    except (json.JSONDecodeError, OSError):
-        pass
-    return ""

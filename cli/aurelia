@@ -444,7 +444,7 @@ def cmd_start(with_http: bool) -> None:
             preserve = "PYTHONPATH,ANTHROPIC_API_KEY,DISCORD_TOKEN,OPENROUTER_API_KEY"
             proc = subprocess.Popen(
                 ["sudo", "-u", "aurelia", f"--preserve-env={preserve}",
-                 "/opt/aurelia/.venv/bin/python3", "-m", "src.samsara.runtime_daemon"],
+                 "/opt/aurelia/.venv/bin/python3", "-m", "src.runtime.runtime_daemon"],
                 cwd=str(PROJECT_ROOT),
                 stdout=log_file,
                 stderr=log_file,
@@ -648,7 +648,7 @@ def cmd_restart(with_http: bool) -> None:
         preserve = "PYTHONPATH,ANTHROPIC_API_KEY,DISCORD_TOKEN,OPENROUTER_API_KEY"
         proc = subprocess.Popen(
             ["sudo", "-u", "aurelia", f"--preserve-env={preserve}",
-             "/opt/aurelia/.venv/bin/python3", "-m", "src.samsara.runtime_daemon"],
+             "/opt/aurelia/.venv/bin/python3", "-m", "src.runtime.runtime_daemon"],
             cwd=str(PROJECT_ROOT),
             stdout=log_file,
             stderr=log_file,
@@ -967,7 +967,7 @@ def cmd_agent_spawn(name: str, goal: str | None) -> None:
 @click.option("--hard", is_flag=True, help="Also wipe identity/ and re-seed from defaults.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
 def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
-    """Reset an agent to blank-slate (wipes karma, akasha, room).
+    """Reset an agent to blank-slate (wipes incarnations, memory, akasha, room).
 
     Safe to call at the start of integration tests.
     Blocked entirely when AURELIA_PRODUCTION is set.
@@ -976,12 +976,16 @@ def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
         console.print("\n  [bold red]✗ Reset is disabled in production (AURELIA_PRODUCTION is set)[/bold red]\n")
         raise SystemExit(1)
 
-    agent_home = Path("/home") / name
-    if not agent_home.exists():
-        console.print(f"\n  [red]✗ Agent home not found:[/red] {agent_home}\n")
+    from src.config import AGENT_HOME_BASE, AGENT_DATA_BASE
+
+    agent_home = AGENT_HOME_BASE / name
+    data_dir = AGENT_DATA_BASE / name
+
+    if not data_dir.exists():
+        console.print(f"\n  [red]✗ Agent data not found:[/red] {data_dir}\n")
         raise SystemExit(1)
 
-    scope = "karma, akasha, room" + (", identity" if hard else "")
+    scope = "memory, akasha, room" + (", identity" if hard else "")
     console.print(f"\n  [bold yellow]Reset agent:[/bold yellow] {escape(name)}")
     console.print(f"  [dim]Scope: {scope}[/dim]")
 
@@ -1011,30 +1015,33 @@ def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
             shutil.rmtree(path)
         path.mkdir(parents=True, exist_ok=True)
 
-    def _wipe_glob(pattern_dir: Path, pattern: str = "*") -> None:
-        if pattern_dir.exists():
-            for f in pattern_dir.glob(pattern):
-                if f.is_file():
-                    f.unlink()
-                elif f.is_dir():
-                    shutil.rmtree(f)
+    memory_dir = data_dir / "memory"
 
-    # Remove karma/current symlink
-    current_link = agent_home / "karma" / "current"
-    if current_link.is_symlink():
-        current_link.unlink()
+    # Remove primary symlink
+    primary_link = memory_dir / "primary"
+    if primary_link.is_symlink():
+        primary_link.unlink()
 
-    # Wipe episodic dirs
-    _wipe_dir(agent_home / "karma" / "episodic" / "core")
-    _wipe_dir(agent_home / "karma" / "episodic" / "extended")
+    # Wipe incarnation dirs (everything in memory/ that is a dir except extended/)
+    if memory_dir.exists():
+        for entry in memory_dir.iterdir():
+            if entry.name == "extended":
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            elif entry.is_symlink():
+                entry.unlink()
 
-    # Wipe semantic extended; reset semantic core to empty file
-    _wipe_dir(agent_home / "karma" / "semantic" / "extended")
-    semantic_core = agent_home / "karma" / "semantic" / "core.jsonl"
-    semantic_core.write_text("")
+    # Reset memory core to empty file
+    core = memory_dir / "core.jsonl"
+    if core.exists():
+        core.write_text("")
+
+    # Wipe extended memory
+    _wipe_dir(memory_dir / "extended")
 
     # Wipe akasha and room
-    _wipe_dir(agent_home / "akasha")
+    _wipe_dir(data_dir / "akasha")
     _wipe_dir(agent_home / "room")
 
     if hard:
@@ -1139,8 +1146,8 @@ def cmd_agent_create(name: str, model: str | None, yes: bool) -> None:
     _require_root()
     console.print(f"\n  [bold]Creating agent:[/bold] {escape(name)}\n")
 
-    from src.samsara.provisioning import create_agent
-    from src.samsara.config import MODEL_SONNET
+    from src.admin.provisioning import create_agent
+    from src.config import MODEL_SONNET
 
     try:
         config = create_agent(name=name, model=model or MODEL_SONNET)
@@ -1187,7 +1194,7 @@ def cmd_agent_destroy(name: str, yes: bool) -> None:
             pass
         (PIDS_DIR / f"agent-{name}.pid").unlink(missing_ok=True)
 
-    from src.samsara.provisioning import destroy_agent
+    from src.admin.provisioning import destroy_agent
 
     try:
         destroy_agent(name)
@@ -1226,14 +1233,10 @@ def cmd_reset(name: str, yes: bool) -> None:
 
     console.print()
 
-    from src.samsara.provisioning import destroy_agent, create_agent
-    from src.samsara.config import MODEL_SONNET
-
-    from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE
-
     if name == "sandbox":
         from src.sandbox.sandbox import SANDBOX_NAMES, provision_sandbox_pool
-        import shutil, subprocess
+        from src.config import AGENT_HOME_BASE, AGENT_DATA_BASE
+        import shutil
 
         console.print(f"  [dim]Nuking all {len(SANDBOX_NAMES)} slots...[/dim]")
         for slot in SANDBOX_NAMES:
@@ -1254,18 +1257,12 @@ def cmd_reset(name: str, yes: bool) -> None:
         console.print()
         return
 
-    console.print("  [dim]Tearing down...[/dim]")
-    try:
-        destroy_agent(name)
-    except Exception as e:
-        console.print(f"  [red]✗ Destroy failed:[/red] {e}\n")
-        return
+    from src.admin.provisioning import reset_agent
 
-    console.print("  [dim]Rebuilding...[/dim]")
     try:
-        config = create_agent(name=name, model=MODEL_SONNET)
+        reset_agent(name=name)
     except Exception as e:
-        console.print(f"  [red]✗ Provisioning failed:[/red] {e}\n")
+        console.print(f"  [red]✗ Reset failed:[/red] {e}\n")
         return
 
     if _runtime_ok():
@@ -1309,6 +1306,46 @@ def cmd_message(agent: str, text: tuple[str, ...]) -> None:
         return
 
     msg = " ".join(text)
+
+    # Ensure Manas is running — it owns the agent's memory dir and must handle spawning
+    if not _manas_alive(agent):
+        run_dir = Path("/var/aurelia/run") / agent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log_path = run_dir / "manas.log"
+        env = _load_env()
+        env["PYTHONPATH"] = str(PROJECT_ROOT)
+        try:
+            with log_path.open("w") as log_f:
+                subprocess.Popen(
+                    ["sudo", "-E", "-u", agent, "/opt/aurelia/bin/manas-launch", agent],
+                    cwd=str(PROJECT_ROOT),
+                    env=env,
+                    stdout=log_f,
+                    stderr=log_f,
+                    start_new_session=True,
+                )
+            console.print(f"  [dim]Starting Manas for {escape(agent)}...[/dim]", end="")
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                time.sleep(0.3)
+                if _manas_alive(agent):
+                    console.print(" [green]✓[/green]")
+                    break
+            else:
+                console.print(" [red]✗ timed out[/red]")
+                output = ""
+                try:
+                    output = log_path.read_text().strip()
+                except OSError:
+                    pass
+                if output:
+                    for line in output.splitlines()[-10:]:
+                        console.print(f"  [red]{escape(line)}[/red]")
+                console.print()
+                return
+        except Exception as e:
+            console.print(f"\n  [red]✗ Failed to start Manas for {escape(agent)}:[/red] {e}\n")
+            return
 
     # Get active incarnation
     ok, active_data = _socket_call({"type": "get_active", "agent": agent})
@@ -1576,17 +1613,18 @@ def cmd_logs(target: str, lines: int) -> None:
 
     # Agent transcript live-follow
     agent = target
-    agent_home = Path("/home") / agent
-    if not agent_home.exists():
-        console.print(f"\n  [red]Agent home not found:[/red] {agent_home}\n")
+    from src.config import AGENT_DATA_BASE
+    data_dir = AGENT_DATA_BASE / agent
+    if not data_dir.exists():
+        console.print(f"\n  [red]Agent not found:[/red] {data_dir}\n")
         return
 
-    # Resolve transcript path: prefer karma/current, fall back to akasha latest
+    # Resolve transcript path: prefer primary incarnation, fall back to akasha latest
     transcript_path: Path | None = None
-    karma_current = agent_home / "karma" / "current"
-    if karma_current.exists() or karma_current.is_symlink():
+    primary_link = data_dir / "memory" / "primary"
+    if primary_link.is_symlink():
         try:
-            active_dir = karma_current.resolve()
+            active_dir = primary_link.resolve()
             candidate = active_dir / "transcript.jsonl"
             if candidate.exists():
                 transcript_path = candidate
@@ -1595,7 +1633,7 @@ def cmd_logs(target: str, lines: int) -> None:
 
     if transcript_path is None:
         # Find most recently modified transcript in akasha
-        akasha = agent_home / "akasha"
+        akasha = data_dir / "akasha"
         if akasha.exists():
             candidates = sorted(
                 akasha.rglob("*transcript.jsonl"),
@@ -1663,6 +1701,162 @@ def _print_jsonl_lines(raw_lines: list[str]) -> None:
             console.print(f"  [dim]{escape(preview)}[/dim]")
 
         console.print(f"  [dim]{sep}[/dim]")
+
+
+# ── aurelia system ────────────────────────────────────────────────────────────
+
+@cli.group("system")
+def cmd_system() -> None:
+    """One-time system setup and maintenance."""
+
+
+@cmd_system.command("setup")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_system_setup(yes: bool) -> None:
+    """Create OS groups, var directories, and sudoers skeleton for a fresh install.
+
+    Safe to re-run — every step is idempotent.  Requires root.
+    """
+    _require_root()
+    from src.admin.system import setup
+
+    console.print()
+    console.print("  [bold]Aurelia system setup[/bold]")
+    console.print()
+
+    if not yes:
+        click.confirm("  Continue?", default=True, abort=True)
+        console.print()
+
+    shell_user = os.environ.get("SUDO_USER", "")
+    results = setup(shell_user=shell_user)
+
+    errors = []
+    for step in results:
+        if step.ok and not step.detail:
+            console.print(f"  [green]✓[/green] {step.label}")
+        elif step.ok:
+            console.print(f"  [dim]~ {step.label} ({step.detail})[/dim]")
+        else:
+            console.print(f"  [yellow]~ {step.label}[/yellow] [dim]{step.detail}[/dim]")
+            errors.append(step.label)
+
+    console.print()
+    if errors:
+        console.print(f"  [yellow]Done with {len(errors)} warning(s). Check output above.[/yellow]")
+    else:
+        console.print("  [green]System setup complete.[/green]")
+        console.print("  [dim]Next: aurelia agent create <name>[/dim]")
+    console.print()
+
+
+@cmd_system.command("reprovision")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_system_reprovision(yes: bool) -> None:
+    """Re-apply OS permissions to all existing agents without wiping data.
+
+    Use after a permission model change. Does not touch file content.  Requires root.
+    """
+    _require_root()
+    from src.admin.system import reprovision
+    from src.config import AGENT_DATA_BASE
+
+    agents = [d.name for d in AGENT_DATA_BASE.iterdir() if d.is_dir()] if AGENT_DATA_BASE.exists() else []
+
+    if not agents:
+        console.print("\n  [yellow]No agents found.[/yellow]\n")
+        return
+
+    console.print()
+    console.print(f"  [bold]Reprovision {len(agents)} agent(s):[/bold] {', '.join(agents)}")
+    console.print("  [dim]Re-applies group membership, sudoers, and per-resource permissions.[/dim]")
+    console.print()
+
+    if not yes:
+        click.confirm("  Continue?", default=True, abort=True)
+        console.print()
+
+    for step in reprovision():
+        if step.ok:
+            console.print(f"  [green]✓[/green] {step.label}")
+        else:
+            console.print(f"  [red]✗[/red] {step.label}: {step.detail}")
+
+    console.print()
+    console.print("  [green]Done.[/green]")
+    console.print()
+
+
+@cmd_system.command("uninstall")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt.")
+def cmd_system_uninstall(yes: bool) -> None:
+    """Completely remove Aurelia from this system.  THIS IS IRREVERSIBLE."""
+    _require_root()
+    from src.admin.system import uninstall
+    from src.config import AGENT_DATA_BASE
+
+    agents = sorted(d.name for d in AGENT_DATA_BASE.iterdir() if d.is_dir()) if AGENT_DATA_BASE.exists() else []
+
+    console.print()
+    console.print("  [bold red]  !! SYSTEM UNINSTALL !!  [/bold red]")
+    console.print()
+    console.print("  This will permanently destroy:")
+    console.print()
+    if agents:
+        for name in agents:
+            console.print(f"    [red]✗[/red] agent [bold]{escape(name)}[/bold] — Linux user, home dir, all memory")
+    else:
+        console.print("    [dim](no agents found)[/dim]")
+    console.print()
+    console.print("    [red]✗[/red] Linux groups: aurelia_admin, aurelia_agents, transport_group")
+    console.print("    [red]✗[/red] Service account: aurelia")
+    console.print("    [red]✗[/red] /var/aurelia  (logs, scheduler queue, runtime state)")
+    console.print("    [red]✗[/red] /etc/sudoers.d/aurelia")
+    console.print()
+    console.print("  [bold red]There is no undo.[/bold red]")
+    console.print()
+
+    if not yes:
+        console.print("  [dim]Type 'uninstall aurelia' to confirm:[/dim]")
+        typed = click.prompt("  ", prompt_suffix="")
+        if typed.strip() != "uninstall aurelia":
+            console.print("\n  [yellow]Aborted.[/yellow]\n")
+            raise SystemExit(0)
+        console.print()
+
+    # Stop running processes before teardown
+    pid = _read_pid("runtime")
+    if pid and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            console.print("  [dim]Stopped runtime daemon[/dim]")
+        except OSError:
+            pass
+
+    if agents:
+        console.print("  [bold dim]Agents[/bold dim]")
+    for name in agents:
+        manas_pid = _read_pid(f"agent-{name}")
+        if manas_pid and _pid_alive(manas_pid):
+            try:
+                os.kill(manas_pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    console.print()
+    console.print("  [bold dim]System files[/bold dim]")
+    for step in uninstall(agents):
+        if step.ok and not step.detail:
+            console.print(f"  [red]✗[/red] {step.label}")
+        elif step.ok:
+            console.print(f"  [dim]~ {step.label} ({step.detail})[/dim]")
+        else:
+            console.print(f"  [dim]~ {step.label} ({step.detail})[/dim]")
+
+    console.print()
+    console.print("  [bold]Uninstall complete.[/bold]")
+    console.print("  [dim]To reinstall: aurelia system setup && aurelia agent create <name>[/dim]")
+    console.print()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Aurelia runtime daemon — listens on Unix socket, dispatches to runtime.py.
+"""Aurelia runtime daemon — listens on Unix socket, routes to Manas or handles system ops.
+
+Agent-specific operations (spawn, dispatch, bardo, etc.) are routed to the
+relevant Manas process via its Unix socket. The daemon only handles system-level
+concerns directly: scheduling, registry, health, and budget reads.
 
 Dev mode: run as 'zuzu' — socket is created at /var/aurelia/runtime.sock
   with permissions 666 (world-rw). No strict group ownership is set.
@@ -26,22 +30,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Ensure the package root is importable when run as -m src.runtime_daemon
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from . import runtime_core as runtime
-from ..agent.hooks import HookType
 
 # ── Manas routing ──────────────────────────────────────────────────────────────
 
+# Requests that belong to a specific agent and must be handled by its Manas process.
 _PER_AGENT_TYPES = frozenset({
     "spawn", "dispatch", "get_history", "list_incarnations",
-    "get_primary", "set_primary", "get_budget_info", "trigger_bardo", "internal_process",
+    "get_primary", "get_active", "set_primary", "trigger_bardo", "internal_process",
 })
 
 
 def _is_manas_live(config: Any) -> bool:
-    """Return True if this agent's Manas socket exists and responds to a ping."""
     if not config.manas_socket.exists():
         return False
     try:
@@ -61,7 +63,6 @@ def _is_manas_live(config: Any) -> bool:
 
 
 def _route_to_manas(config: Any, request: dict) -> Any:
-    """Forward a non-streaming request to Manas and return the result data."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(300.0)
         s.connect(str(config.manas_socket))
@@ -80,12 +81,6 @@ def _route_to_manas(config: Any, request: dict) -> Any:
 
 
 def _route_to_manas_stream(config: Any, request: dict, send_frame: Any) -> Any:
-    """Forward a streaming dispatch to Manas.
-
-    Calls send_frame for each intermediate frame. Returns the result dict from
-    Manas's done frame — the caller is responsible for sending its own done frame
-    with the correct request id.
-    """
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(10.0)
         s.connect(str(config.manas_socket))
@@ -108,13 +103,14 @@ def _route_to_manas_stream(config: Any, request: dict, send_frame: Any) -> Any:
                     return frame.get("data")
                 send_frame(frame)
 
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 SOCKET_PATH = Path("/var/aurelia/runtime.sock")
 LOG_PATH = Path("/var/aurelia/logs/runtime.log")
 SOCKET_GROUP = "transport_group"
-SOCKET_MODE_PROD = 0o660   # aurelia:transport_group — only group members can connect
-SOCKET_MODE_DEV = 0o666    # world-rw for dev (both processes run as zuzu)
+SOCKET_MODE_PROD = 0o660
+SOCKET_MODE_DEV = 0o666
 MAX_WORKERS = 10
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
@@ -123,15 +119,12 @@ MAX_WORKERS = 10
 def _setup_logging() -> logging.Logger:
     logger = logging.getLogger("aurelia.runtime_daemon")
     logger.setLevel(logging.DEBUG)
-
     fmt = logging.Formatter("%(message)s")
 
-    # stderr handler (always available)
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
 
-    # file handler (best-effort — may fail in dev if /var/aurelia doesn't exist yet)
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
@@ -150,8 +143,6 @@ log = _setup_logging()
 
 
 def _get_peer_cred(conn: socket.socket) -> tuple[int, int, int]:
-    """Read SO_PEERCRED from a connected Unix socket. Returns (pid, uid, gid)."""
-    # struct ucred: pid_t (4), uid_t (4), gid_t (4) — Linux only
     try:
         cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
         pid, uid, gid = struct.unpack("3i", cred)
@@ -167,57 +158,74 @@ def _now_iso() -> str:
 # ── Request routing ────────────────────────────────────────────────────────────
 
 
-def _dispatch(request: dict[str, Any]) -> Any:
-    """Route a parsed request dict to the correct runtime function and return result."""
+def _require_agent_uid(uid: int, claimed_agent: str) -> None:
+    import pwd
+    own_uid = os.getuid()
+    if uid == 0 or uid == own_uid:
+        return
+    try:
+        expected_uid = pwd.getpwnam(claimed_agent).pw_uid
+    except KeyError:
+        raise PermissionError(f"No Linux user for agent '{claimed_agent}'")
+    if uid != expected_uid:
+        raise PermissionError(
+            f"UID {uid} is not allowed to act as agent '{claimed_agent}' (expected uid {expected_uid})"
+        )
+
+
+def _dispatch(request: dict[str, Any], peer_uid: int = -1) -> Any:
     req_type = request.get("type")
     agent_name = request.get("agent")
 
-    if req_type in _PER_AGENT_TYPES and agent_name:
+    # Agent-specific operations must go to the agent's Manas process.
+    if req_type in _PER_AGENT_TYPES:
+        if not agent_name:
+            raise ValueError(f"'{req_type}' requires 'agent' field")
         registry = runtime.get_registry()
         config = registry.get(agent_name)
-        if config and _is_manas_live(config):
-            return _route_to_manas(config, request)
-        if req_type == "dispatch":
+        if config is None:
+            raise ValueError(f"Agent '{agent_name}' not found")
+        if not _is_manas_live(config):
             raise RuntimeError(
                 f"Manas is not running for agent '{agent_name}'. "
                 "Start it with: sudo aurelia agent start <name>"
             )
+        return _route_to_manas(config, request)
 
     match req_type:
-        case "spawn":
-            return runtime.spawn(
-                agent=request["agent"],
-                goal=request.get("goal"),
-                make_primary=request.get("make_primary"),
-            )
-        case "dispatch":
-            raise RuntimeError("dispatch reached fallback — this should never happen")
-        case "get_history":
-            return runtime.get_history(
-                agent=request["agent"],
-                incarnation=request["incarnation"],
-            )
-        case "list_incarnations":
-            return runtime.list_incarnations(agent=request["agent"])
         case "list_agents":
             return runtime.list_agents()
         case "get_health":
             return runtime.get_health()
-        case "trigger_bardo":
-            agent = request["agent"]
-            primary = runtime.get_primary(agent)
-            if not primary:
-                return {"status": "no_active", "agent": agent}
-            return runtime.trigger_bardo(agent, primary)
-        case "internal_process":
-            return _dispatch_internal_process(request)
-        case "get_primary":
-            return {"primary": runtime.get_primary(request["agent"])}
-        case "set_primary":
-            runtime.set_primary(request["agent"], request["name"])
-            return {"status": "ok"}
         case "get_budget_info":
             return runtime.get_budget_info(request["agent"])
+        case "schedule":
+            from .scheduler import AGENT_TYPES, ScheduledItem, write_scheduled_item
+            agent = request.get("agent", "")
+            if not agent:
+                raise ValueError("schedule requires 'agent'")
+            _require_agent_uid(peer_uid, agent)
+            task_type = request.get("schedule_type", "scheduled_task")
+            if task_type not in AGENT_TYPES:
+                raise PermissionError(
+                    f"Agents may only schedule {sorted(AGENT_TYPES)}, not '{task_type}'"
+                )
+            item = ScheduledItem(
+                agent=agent,
+                goal=request.get("goal", ""),
+                type=task_type,
+                trigger_time=request.get("trigger_time"),
+                recurring=request.get("recurring", False),
+                interval_hours=request.get("interval_hours"),
+                rebirth_from=request.get("rebirth_from"),
+                created_by=request.get("created_by", agent),
+                payload=request.get("payload") or {},
+            )
+            write_scheduled_item(item)
+            scheduler = getattr(runtime, "_scheduler", None)
+            if scheduler:
+                scheduler.tick_now()
+            return {"status": "scheduled", "id": item.id}
         case "registry_reload":
             registry = runtime.get_registry()
             registry._refresh()
@@ -232,55 +240,8 @@ def _dispatch(request: dict[str, Any]) -> Any:
             raise ValueError(f"Unknown request type: {req_type!r}")
 
 
-def _dispatch_internal_process(request: dict[str, Any]) -> dict[str, Any]:
-    """Handle autonomous hook processing (heartbeat, scheduled_task, agent_invite)."""
-    from ..agent.hooks import heartbeat_precheck
-
-    agent_name = request["agent"]
-    hook_type = request["hook_type"]
-    goal = request.get("goal", "")
-    payload = request.get("payload") or {}
-    rebirth_from = request.get("rebirth_from")
-
-    registry = runtime.get_registry()
-    config = registry.get(agent_name)
-    if not config:
-        raise ValueError(f"Agent '{agent_name}' not found")
-
-    if hook_type == HookType.HEARTBEAT:
-        if not heartbeat_precheck(config):
-            return {"status": "skipped", "reason": "heartbeat_precheck_false", "agent": agent_name}
-
-    hook_prompt = runtime.build_hook_prompt(
-        agent=agent_name,
-        hook_type=hook_type,
-        goal=goal,
-        payload=payload,
-        rebirth_from=rebirth_from,
-    )
-
-    incarnation_state = runtime.spawn_fresh_for_hook(agent_name, hook_type)
-
-    response_text, next_action = runtime.run_hook(
-        agent=agent_name,
-        hook_type=hook_type,
-        hook_prompt=hook_prompt,
-        incarnation_state=incarnation_state,
-    )
-
-    return {
-        "status": "ok",
-        "agent": agent_name,
-        "incarnation": incarnation_state["name"],
-        "hook": hook_type,
-        "next_action": next_action.get("type", "sleep"),
-    }
-
-
 def _serialize(obj: Any) -> Any:
-    """Recursively convert dataclass instances to dicts for JSON serialization."""
     import dataclasses
-
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         return {k: _serialize(v) for k, v in dataclasses.asdict(obj).items()}
     if isinstance(obj, list):
@@ -296,12 +257,6 @@ def _serialize(obj: Any) -> Any:
 
 
 def _handle_connection(conn: socket.socket) -> None:
-    """Handle one client connection: read JSON request, dispatch, write JSON response.
-
-    When the request includes "stream": true (only valid for "dispatch" type),
-    the connection stays open and intermediate frames are written as newline-
-    delimited JSON before a final {"type":"done"} frame closes the exchange.
-    """
     pid, uid, gid = _get_peer_cred(conn)
 
     with conn:
@@ -324,7 +279,6 @@ def _handle_connection(conn: socket.socket) -> None:
             is_streaming = bool(request.get("stream")) and req_type == "dispatch"
 
             if is_streaming:
-                # Remove timeout for the duration of the streamed response
                 conn.settimeout(None)
 
                 def send_frame(frame: dict[str, Any]) -> None:
@@ -337,9 +291,8 @@ def _handle_connection(conn: socket.socket) -> None:
                     if _config and _is_manas_live(_config):
                         result = _route_to_manas_stream(_config, request, send_frame)
                     else:
-                        agent_name = request.get("agent", "unknown")
                         raise RuntimeError(
-                            f"Manas is not running for agent '{agent_name}'. "
+                            f"Manas is not running for agent '{request.get('agent', 'unknown')}'. "
                             "Start it with: sudo aurelia agent start <name>"
                         )
                     duration_ms = int((time.monotonic() - t_start) * 1000)
@@ -371,17 +324,11 @@ def _handle_connection(conn: socket.socket) -> None:
                     )
                 return
 
-            # ── Non-streaming path (unchanged) ──────────────────────────────────
             t_start = time.monotonic()
-
             try:
-                result = _dispatch(request)
+                result = _dispatch(request, peer_uid=uid)
                 duration_ms = int((time.monotonic() - t_start) * 1000)
-                response = {
-                    "id": req_id,
-                    "status": "ok",
-                    "data": _serialize(result),
-                }
+                response = {"id": req_id, "status": "ok", "data": _serialize(result)}
                 log.info(
                     f"{_now_iso()} pid={pid} uid={uid} gid={gid} "
                     f"type={req_type} agent={agent} status=ok duration_ms={duration_ms}"
@@ -416,8 +363,6 @@ def _handle_connection(conn: socket.socket) -> None:
 
 
 def _setup_socket() -> socket.socket:
-    """Create and bind the Unix socket, set ownership and permissions."""
-    # Remove stale socket file from a previous (crashed) run
     if SOCKET_PATH.exists() or SOCKET_PATH.is_symlink():
         SOCKET_PATH.unlink()
     SOCKET_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -427,7 +372,6 @@ def _setup_socket() -> socket.socket:
     server.bind(str(SOCKET_PATH))
     server.listen(64)
 
-    # Attempt production-mode permission setup (requires root or correct group membership)
     is_root = os.geteuid() == 0
     try:
         gid = grp.getgrnam(SOCKET_GROUP).gr_gid
@@ -439,14 +383,12 @@ def _setup_socket() -> socket.socket:
                 f"owned by aurelia:{SOCKET_GROUP} mode=660 (production)"
             )
         else:
-            # Dev: can't chown, set 666 so both zuzu processes can connect
             os.chmod(str(SOCKET_PATH), SOCKET_MODE_DEV)
             log.info(
                 f"[runtime_daemon] Dev mode — socket {SOCKET_PATH} mode=666 "
                 f"(not root, skipping group ownership)"
             )
     except KeyError:
-        # transport_group doesn't exist — dev environment
         os.chmod(str(SOCKET_PATH), SOCKET_MODE_DEV)
         log.info(
             f"[runtime_daemon] Dev mode — group '{SOCKET_GROUP}' not found, "
@@ -473,7 +415,7 @@ class RuntimeDaemon:
         signal.signal(signal.SIGINT, self._signal_handler)
 
         server = _setup_socket()
-        server.settimeout(1.0)  # allow periodic shutdown checks
+        server.settimeout(1.0)
 
         log.info(f"[runtime_daemon] Listening on {SOCKET_PATH} (max_workers={MAX_WORKERS})")
 
@@ -484,13 +426,12 @@ class RuntimeDaemon:
                     conn, _ = server.accept()
                     executor.submit(_handle_connection, conn)
                 except socket.timeout:
-                    continue  # check shutdown flag
+                    continue
                 except OSError as e:
                     if not self._shutdown.is_set():
                         log.error(f"[runtime_daemon] Accept error: {e}")
 
         server.close()
-        # Clean up socket file on graceful exit
         try:
             SOCKET_PATH.unlink(missing_ok=True)
         except OSError:
@@ -501,10 +442,9 @@ class RuntimeDaemon:
 def main() -> None:
     log.info(f"[runtime_daemon] Starting (pid={os.getpid()}, uid={os.getuid()})")
 
-    # Start scheduler as a background thread — same process, no IPC needed
     from .scheduler import SchedulerDaemon
     scheduler = SchedulerDaemon()
-    runtime._scheduler = scheduler  # expose for socket command handler
+    runtime._scheduler = scheduler
     scheduler_thread = threading.Thread(target=scheduler.run, daemon=True, name="scheduler")
     scheduler_thread.start()
     log.info("[runtime_daemon] Scheduler thread started")

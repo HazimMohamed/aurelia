@@ -1,8 +1,9 @@
 # Aurelia Design Document
+### A Personal AI Civilization
 
-**Version:** 2.0
+**Version:** 0.3
 **Status:** Current production architecture (post-M3)
-**Author:** Hazim Mohamed
+**Author:** Hazim Mohamed and his beloved Claude Sonnet
 
 ---
 
@@ -10,11 +11,11 @@
 
 **Incarnation** — A single agent lifetime from spawn to bardo. Has a unique name, one context window, one conversation thread. Many cycles per incarnation.
 
-**Cycle** — One message/response loop within an incarnation. The agent receives input, calls tools, returns a response. Cycles accumulate in the same context until bardo.
+**Cycle** — One message/response loop within an incarnation. The agent receives input, calls tools, returns a response. Cycles are delimited by waiting for human input. Cycles accumulate in the same context until bardo.
 
 **Bardo** — Memory consolidation subprocess between incarnations. Runs when an incarnation ends — summarizes transcript, processes memory flags, archives to Akashic records, cleans working memory. Smart-gated: decides whether to consolidate (Sonnet summary), archive-only, or discard entirely.
 
-**Akashic Records** — Complete, immutable archive of dissolved incarnations. Per-agent in `/var/aurelia/agents/{agent}/akasha/`. The past is permanent.
+**Akashic Records** — Complete, immutable archive of all dissolved non-trivial incarnations. Per-agent in `/var/aurelia/agents/{agent}/akasha/`. The past is permanent.
 
 **Constitution** — The governing document injected at the top of every incarnation's context. Read-only to agents. Lives in `/home/{agent}/constitution/`.
 
@@ -22,9 +23,9 @@
 
 **Scratch** — Incarnation-scoped workspace (`/var/aurelia/agents/{agent}/memory/{incarnation}/scratch/`). Archived to Akashic after bardo, then deleted.
 
-**Semantic core** — Always-loaded distilled wisdom, size-capped at ~500 tokens (~2000 chars). The most fundamental durable knowledge.
+**Memory core** — Always-loaded distilled wisdom, size-capped per agent. The most fundamental durable knowledge and formative experiences. (`memory/core.jsonl`)
 
-**Episodic core** — Always-loaded formative experiences. Specific moments promoted by God-lite (via Janitor) that shaped the agent's character.
+**Memory extended** — Full historical record retrieved on demand. Bardo summaries, episodic entries, semantic insights — one file per category. (`memory/extended/{category}.jsonl`)
 
 **Primary incarnation** — The active, default incarnation for an agent. Receives human messages unless otherwise specified. Tracked via symlink at `/var/aurelia/agents/{agent}/memory/primary`.
 
@@ -32,7 +33,7 @@
 
 **God-lite** — Hazim. Local deity of the plane. Controls conditions, budget, and continuity. Also answers to God, Zuzu, and Hazim.
 
-**Runtime** — The OS of the plane. The folder `src/runtime/` holds the runtime daemon, scheduler, registry, and config. Agents ride on it; they don't control it.
+**Runtime** — The OS of the plane. `src/runtime/` holds the runtime daemon, scheduler, and registry. A pure router — all agent execution happens in Manas. Agents ride on it; they don't control it.
 
 **Transport** — Any process that translates outside-world intent into runtime calls. HTTP, Discord, and the `aurelia` CLI are all transports.
 
@@ -76,7 +77,7 @@ Format: `{agent}-{adjective}-{noun}-{random-suffix}`
 **Directory structure created:**
 ```
 /var/aurelia/agents/{agent}/memory/{incarnation}/
-    transcript.jsonl       ← infrastructure writes, agent reads via Manas
+    transcript.jsonl       ← Manas writes, agent reads
     scratch/               ← agent owns, writable
 ```
 
@@ -96,7 +97,7 @@ An incarnation begins when one of four hooks fires:
 A user (God-lite, Discord, HTTP) sends a message. Routes to the named incarnation if specified; otherwise finds the primary or spawns one.
 
 **2. Heartbeat** (`HookType.HEARTBEAT`)
-Scheduler fires at configured interval. Fast pre-check runs before the LLM call:
+Scheduler fires at configured interval. A fast pre-check runs before the LLM call — but it gates only on budget, not on pending work:
 
 ```python
 def heartbeat_precheck(config) -> bool:
@@ -104,13 +105,12 @@ def heartbeat_precheck(config) -> bool:
         return False
     if get_budget_remaining(config) < MIN_THRESHOLD:
         return False
-    # Heartbeat fires only if there's unread work or spare budget
-    has_unread = count_bulletin_unread(config) > 0
-    has_scheduled = count_scheduled_now(config) > 0
-    return has_unread or has_scheduled
+    return True  # budget exists → agent wakes
 ```
 
-If precheck fails, no cycle runs. If it passes, the agent wakes and decides what to do with its heartbeat time.
+If budget exists, the agent wakes. What it does with that time — pursue a scheduled task, explore something it's curious about, write in its room — is the agent's business. The heartbeat prompt surfaces pending items if any exist, but the agent is free to ignore them and follow genuine curiosity.
+
+When the primary incarnation is in active conversation with God-lite, the heartbeat spawns a fresh exploratory incarnation (Inc-B) rather than interrupting. When the primary is idle, heartbeat routes to it directly.
 
 **3. Scheduled Task** (`HookType.SCHEDULED_TASK`)
 Scheduler fires a previously scheduled item. May be agent-initiated (via `schedule_task` tool) or system-initiated. Carries a specific goal and optional rebirth context.
@@ -118,7 +118,7 @@ Scheduler fires a previously scheduled item. May be agent-initiated (via `schedu
 Self-perpetuation — an agent scheduling itself to continue work in a fresh incarnation — is a scheduled task with `rebirth_from` set.
 
 **4. Agent Invite** (`HookType.AGENT_INVITE`)
-When one agent uses `invite_agent`, the target's primary incarnation is bardo'd and a fresh incarnation spawns with this hook. The agent responds using `answer_phone`.
+When one agent uses `invite_agent`, a fresh incarnation of the target spawns with this hook. The fresh incarnation stays "active" (non-primary) — the target's ongoing primary conversation is not displaced. The invited agent's full memory core and room are available from spawn, giving genuine cross-pollination without complexity. The agent responds using `answer_phone`.
 
 ### 1.3 Cycles
 
@@ -140,14 +140,7 @@ Text response → write to transcript → return to caller
 **Tool execution loop:**
 Agents can call multiple tools in a single turn (up to `MAX_TOOL_CYCLES = 30`). The runtime executes each tool, injects results, and continues the LLM call until a text response.
 
-**Budget tracking:**
-Token usage (input + output + cache read/write) is logged per cycle. If weekly budget is exhausted:
-1. Current cycle completes (never cut off mid-response)
-2. Status → `"budget_paused"`
-3. Dashboard notification written
-4. Future cycles blocked until manual override
-
-See `src/agent/budget.py::check_and_apply_budget`.
+**Budget tracking:** See §6.4.
 
 ### 1.4 Context Assembly
 
@@ -157,11 +150,9 @@ def build_system_prompt(config, hook_content=""):
     parts = [
         load_constitution(config),              # /home/{agent}/constitution/
         load_identity(config),                  # /home/{agent}/identity/
-        load_semantic_core(config),             # always loaded, ~500 tokens
-        load_episodic_core(config),             # formative experiences
+        load_memory_core(config),               # always loaded, size-capped
         load_hazim_introduction(),              # /var/aurelia/shared/hazim_introduction.md
-        load_shared_hazim_context(),            # top-N scored entries
-        describe_room_and_scratch(config),      # orientation block
+        load_shared_hazim_context(),            # top-N entries by recency
     ]
     return "\n\n---\n\n".join(parts)
 ```
@@ -170,15 +161,13 @@ def build_system_prompt(config, hook_content=""):
 - **Human message:** Full transcript + relevant extended memory + new message
 - **Heartbeat/Scheduled/Invite:** Fresh context, hook prompt only
 
-Extended memory (semantic/episodic) is retrieved on-demand via keyword matching against the current message. Semantic embedding search is on the roadmap.
+Extended memory is retrieved on-demand via keyword matching against the current message. Semantic embedding search is on the roadmap.
 
 ### 1.5 Bardo
 
 Bardo is triggered externally — **not by the agent.** Triggers:
 1. Scheduled bardo timeout check (per-agent configurable, default 48h)
-2. Forced bardo before agent invite
-3. Budget exhaustion
-4. Manual via CLI (`aurelia agent bardo <name>`)
+2. Manual via CLI (`aurelia agent bardo <name>`)
 
 **Smart gating:**
 
@@ -203,19 +192,19 @@ def run_bardo(config, incarnation_name):
 
     # Step 2: Full consolidation
     summary = sonnet.summarize(entries)
-    write_episodic_extended(summary)
+    write_memory_extended(summary, category="episodic")
 
     # Step 3: Process memory_flag entries
     for flag in memory_flags:
-        if flag.tier == "semantic_core":
-            write_semantic_core(config, flag)
-        elif flag.tier == "semantic":
-            write_semantic_extended(config, flag.category, flag)
+        if flag.tier == "core":
+            write_memory_core(config, flag)
+        elif flag.tier == "extended":
+            write_memory_extended(config, flag.category, flag)
 
     # Step 4: Extract unflagged insights (bardo-initiated)
-    insights = extract_semantic_insights(entries)
+    insights = extract_insights(entries)
     for insight in insights:
-        write_semantic_extended(config, insight.category, insight)
+        write_memory_extended(config, insight.category, insight)
 
     # Step 5: Archive to Akashic
     copy(transcript_path → akasha/{name}/{name}-transcript.jsonl)
@@ -230,23 +219,20 @@ def run_bardo(config, incarnation_name):
 ```
 
 **`_worth_archiving`:**
-False if transcript contains nothing beyond `incarnation_start` marker. Empty incarnations are discarded without a trace.
+False if transcript contains nothing beyond `incarnation_start` marker. Empty incarnations are discarded without a trace. This catches: heartbeats where the agent woke with budget but immediately ended the cycle; invite recipients who declined without any real exchange.
 
 **`_worth_consolidating`:**
 False if no human messages, no memory flags, and fewer than 3 tool calls. Mechanical heartbeats that did nothing get archived but skip the Sonnet summary.
 
-**TODO:** Consider mermaid diagram for bardo flow instead of ASCII (visual clarity, maintain ASCII for grep/CLI).
-
 ### 1.6 Undissolve
 
-Any dissolved incarnation can be restored from Akashic records:
+Any archived incarnation can be restored from Akashic records:
 
 ```python
 def undissolve(agent: str, incarnation_name: str):
     akasha_path = config.akasha_dir / incarnation_name
     memory_path = config.memory_dir / incarnation_name
 
-    # Restore from archive
     memory_path.mkdir()
     shutil.copy(
         akasha_path / f"{incarnation_name}-transcript.jsonl",
@@ -254,14 +240,12 @@ def undissolve(agent: str, incarnation_name: str):
     )
     (memory_path / "scratch").mkdir()
 
-    # Note the restoration in transcript
     append_entry(memory_path / "transcript.jsonl", {
         "type": "undissolved",
         "ts": now(),
         "note": "Incarnation restored by God-lite"
     })
 
-    # Set as primary (optional)
     set_primary_incarnation(config, incarnation_name)
 ```
 
@@ -275,22 +259,18 @@ Memory is the continuity. Incarnations are temporary. Memory is permanent.
 
 ### 2.1 Directory Structure
 
-Aurelia uses a **data/home split** to prevent agents from accessing their own internal state:
-
 ```
-/var/aurelia/agents/{agent}/          ← infrastructure-managed, agent has limited access
+/var/aurelia/agents/{agent}/
     agent.json                         ← config (model, budget, heartbeat interval)
     memory/
         primary → {incarnation}/       ← symlink to primary incarnation
         {incarnation}/
-            transcript.jsonl           ← infra writes, agent reads
+            transcript.jsonl           ← Manas writes, agent reads
             scratch/                   ← agent owns
-        episodic/
-            core/                      ← formative experiences, always loaded
-            extended/                  ← full history, retrieved on demand
-        semantic/
-            core.jsonl                 ← always loaded, size-capped ~500 tokens
-            extended/                  ← retrieved on demand by category
+        core.jsonl                     ← always loaded, size-capped
+        extended/                      ← retrieved on demand by category
+            episodic.jsonl             ← bardo summaries, full conversation records
+            {category}.jsonl           ← agent-chosen categories
     akasha/                            ← dissolved incarnations, infra writes
         {incarnation}/
             {incarnation}-transcript.jsonl
@@ -306,50 +286,43 @@ Aurelia uses a **data/home split** to prevent agents from accessing their own in
     manas.pid                          ← process ID
 ```
 
-Paths are centralized on `AgentConfig` (`src/runtime/config.py`). Every module resolves via properties like `config.memory_dir`, `config.akasha_dir`, `config.room_dir`.
+Paths are centralized on `AgentConfig` (`src/config.py`). Every module resolves via properties like `config.memory_dir`, `config.akasha_dir`, `config.room_dir`.
 
-### 2.2 Semantic Memory: Core vs Extended
+### 2.2 Memory: Core vs Extended
 
-**Core** (`memory/semantic/core.jsonl`)
-Always loaded. Every incarnation. Size-capped at ~500 tokens (~2000 chars). Contains the most fundamental durable facts — critical things about Hazim, the agent's essential self-model, cultural norms of the plane.
+**Core** (`memory/core.jsonl`)
+Always loaded. Every incarnation. Size-capped per agent (default ~500 tokens / ~2000 chars, configurable in `agent.json`). Contains the most fundamental durable facts — essential self-model, critical facts about Hazim, formative experiences that shaped the agent's character.
 
-Agents flag `tier: "semantic_core"` in `memory_write` tool calls. Writes are **immediate** (Path 1) — written before bardo, not after. Infrastructure enforces the size cap by scoring entries on (importance, timestamp) and dropping the lowest-ranked.
+The cap exists to enforce curation discipline, not to save tokens. Without it, agents flag everything as important in the moment and the core quietly bloats. The cap forces the question: "is this irreducible, or just feels important right now?" A deeply-developed personal agent might warrant 1000 tokens; a simple task agent 300. The number matters less than having one.
 
-File locking (`fcntl.LOCK_EX`) ensures atomic writes across concurrent cycles.
-
-**Extended** (`memory/semantic/extended/{category}.jsonl`)
-Retrieved on demand during context assembly. One file per category. Currently loaded via keyword match against the user message. Categories are agent-chosen (e.g., `preferences.jsonl`, `patterns.jsonl`).
+Agents write to core via `memory_write` with `tier: "core"`. Writes are **immediate** — written before bardo, not after. Infrastructure enforces the size cap by scoring entries on (importance, timestamp) and dropping the lowest-ranked. File locking (`fcntl.LOCK_EX`) ensures atomic writes across concurrent cycles.
 
 **The six-month test:**
-Would this still be true and useful six months from now? If yes — semantic. If time-bound or event-specific — episodic or transient.
+Would this still be true and useful six months from now? If yes — core or extended. If time-bound or event-specific — extended or transient.
 
 ```
-Belongs in semantic:
+Belongs in core (always in context):
     "Hazim responds better to directness than diplomatic softening"
     "OMAD pattern — meal timing matters more than frequency"
+    "The time I made a bad call on X — what I learned"
 
-Does not belong in semantic:
-    "Hazim mentioned salmon on March 15"        → episodic
-    "Dinner party March 20, 8 people"           → transient, not worth storing
+Belongs in extended (retrievable on demand):
+    "Dinner party planning notes from March"
+    "Three-month arc of conversations about teaching transition"
+
+Does not belong in memory:
+    "Dinner party March 20, 8 people"    → transient, not worth storing
 ```
 
-### 2.3 Episodic Memory: Core vs Extended
+**Extended** (`memory/extended/{category}.jsonl`)
+Retrieved on demand during context assembly. One file per category. Loaded via keyword match against the current message. Categories are agent-chosen (e.g., `episodic.jsonl`, `preferences.jsonl`, `patterns.jsonl`).
 
-**Core** (`memory/episodic/core/`)
-Always loaded. Contains formative experiences — the specific moments that shaped who this agent is. Not the most recent, but the most significant.
+Bardo writes the incarnation summary here as a `bardo_summary` entry in `episodic.jsonl`. All memory — whether about facts, experiences, or formative moments — lives in the same store. The distinction is core (always present) vs extended (retrieved when relevant), not the type of content.
 
-Three subtypes:
-- `formative_success` — promoted via Enshrine (future: FE button; today: Janitor CLI)
-- `formative_error` — promoted via Traumatize (future: FE button; today: Janitor CLI)
-- `formative_moment` — manually promoted by God-lite
-
-**Extended** (`memory/episodic/extended/`)
-Retrieved on demand. Full historical record — one file per incarnation, produced by bardo. Normal conversation records, routine completions, everything bardo writes by default.
-
-### 2.4 Memory Write Paths
+### 2.3 Memory Write Paths
 
 **Path 1: Agent-initiated (immediate)**
-Agent calls `memory_write` during any cycle. Infrastructure appends a `memory_flag` entry to transcript and writes to semantic immediately (both core and extended tiers).
+Agent calls `memory_write` during any cycle. Infrastructure appends a `memory_flag` entry to transcript and writes to memory immediately.
 
 ```python
 def handle_memory_write(params, **ctx):
@@ -358,66 +331,34 @@ def handle_memory_write(params, **ctx):
         "type": "memory_flag",
         "content": params["content"],
         "importance": params["importance"],
-        "tier": params.get("tier", "episodic"),
+        "tier": params.get("tier", "extended"),
         "category": params.get("category", "general"),
         "incarnation": incarnation_state["name"],
     }
 
     append_entry(transcript_path, entry)
 
-    if tier == "semantic_core":
-        write_semantic_core(config, entry)    # with lock, size-capped
-    elif tier == "semantic":
-        write_semantic_extended(config, category, entry)
-    # episodic tier flags are captured in bardo summary
+    if tier == "core":
+        write_memory_core(config, entry)    # with lock, size-capped
+    elif tier == "extended":
+        write_memory_extended(config, category, entry)
 ```
 
 **Path 2: Bardo-initiated (on completion)**
-Bardo model reads the transcript, extracts unflagged insights that pass the six-month test, writes them to semantic extended as `bardo_insight` entries. The fallback consolidation path — catches what the agent didn't explicitly flag.
+Bardo model reads the transcript, extracts unflagged insights that pass the six-month test, writes them to extended memory as `bardo_insight` entries. The fallback consolidation path — catches what the agent didn't explicitly flag.
 
-### 2.5 Permissions
-
-With Manas, the agent process runs as the agent's Linux user. Permissions are natural:
-
-```
-/var/aurelia/agents/{agent}/memory/{incarnation}/transcript.jsonl
-    → aurelia:aurelia 640
-    → Manas (running as agent user) can read via group membership
-
-/var/aurelia/agents/{agent}/memory/{incarnation}/scratch/
-    → {agent}:{agent} 700
-    → Manas owns this, full read/write
-
-/home/{agent}/room/
-    → {agent}:{agent} 700
-    → Agent owns permanently
-
-/home/{agent}/identity/, /home/{agent}/constitution/
-    → aurelia:aurelia 644
-    → Manas can read, cannot write
-
-/var/aurelia/agents/{agent}/akasha/
-    → aurelia:aurelia 750
-    → Read-only archive, infra writes
-```
-
-Agents **cannot** read their own Akashic records directly via bash — this was disabled because agents would reflexively do this at startup and waste tokens. Memory access is controlled:
-1. Semantic/episodic core → always loaded in system prompt
-2. `search_episodic` tool → targeted retrieval from extended memory
-3. bash access → `/home/{agent}/room/` and scratch only
-
-### 2.6 Episodic Search
+### 2.4 Memory Search
 
 ```bash
 # Via tool — keyword match over all extended/*.jsonl, returns JSON
-search_episodic(query="dinner party planning", limit=5)
+search_memory(query="dinner party planning", limit=5)
 ```
 
 Available to every agent in every hook. Semantic embedding search is on the roadmap.
 
 ---
 
-## 3. The Shared Human Context
+## 3. The Plane's Shared State
 
 ### 3.1 The Hazim Introduction
 
@@ -435,12 +376,14 @@ Read at context assembly of every incarnation. Who he is, what he cares about, w
 /var/aurelia/shared/hazim.jsonl
 ```
 
-A scored stack. Top-N entries (by `score`, capped by char budget) loaded at context assembly, with 30-day default expiry. Any agent can append via `shared_context_write` tool.
+Append-only, no expiry, no score. Top-N entries by recency (capped by char budget) are loaded into context at assembly. Any agent can append via `shared_context_write` tool.
 
 ```json
-{"ts": "...", "type": "fact", "author": "personal", "content": "Transitioning to teaching around 2027", "score": 0.9}
-{"ts": "...", "type": "state", "author": "personal", "content": "Processing something difficult this week", "score": 0.7}
+{"ts": "...", "type": "fact", "author": "personal", "content": "Transitioning to teaching around 2027"}
+{"ts": "...", "type": "state", "author": "personal", "content": "Processing something difficult this week"}
 ```
+
+Facts are never deleted — they simply fall below the recency window as newer entries arrive, at which point they remain in the file and searchable but no longer auto-load into context. Nothing is ever surprise-forgotten.
 
 **What belongs:**
 - Durable facts about Hazim's life
@@ -448,9 +391,9 @@ A scored stack. Top-N entries (by `score`, capped by char budget) loaded at cont
 - Goals and transitions
 
 **What does not belong:**
-- Conversation specifics (→ own episodic)
+- Conversation specifics (→ own extended memory)
 - Single events (→ transient, not worth storing)
-- Things only you benefit from knowing (→ own semantic)
+- Things only you benefit from knowing (→ own core/extended)
 
 File lock on writes (`fcntl`) ensures atomic appends.
 
@@ -464,13 +407,28 @@ File lock on writes (`fcntl`) ensures atomic appends.
 
 ```
 User (HTTP/Discord/CLI)
-    ↓
+    ↓ via /var/aurelia/runtime.sock
 Runtime daemon (aurelia user)
-    ↓ dispatch via socket
+    ↓ via /var/aurelia/run/{agent}/manas.sock
 Manas process (agent user)
     ↓ executes tools, calls LLM
 Agent code runs with agent's natural permissions
 ```
+
+Both layers communicate over Unix domain sockets using the same newline-delimited JSON protocol (see §4.5).
+
+**Responsibility split:**
+
+| Runtime | Manas |
+|---|---|
+| Accept connections from transports | Accept dispatches from runtime |
+| Route to correct Manas socket | Run agent cycles |
+| Spawn Manas if not running | Write transcript entries |
+| Manage scheduler thread | Check and deduct budget |
+| Maintain agent registry | Write dashboard notifications |
+| — | Trigger bardo |
+
+The runtime never touches individual agent data directly. It hands work to Manas and receives a result.
 
 **Per-agent Manas:**
 ```
@@ -481,22 +439,76 @@ Agent code runs with agent's natural permissions
 
 Runtime daemon discovers Manas sockets via filesystem. If Manas isn't running for an agent, runtime spawns it on-demand.
 
-**Tool execution:**
-When an agent calls `bash_exec`, the command runs directly as the agent user (Manas is already that user). No sudo needed.
+See `src/manas/`.
 
-See `src/runtime/manas.py`.
+### 4.2 Filesystem Layout and Permissions
 
-### 4.2 Source Tree
+Manas runs as a specific user to prevent prompt injection attacks from escalating to general system access attacks. The OS should stop a hijacked Manas process from doing anything too malicious. 
+
+The agent/infrastructure boundary is enforced at the **tool layer**, not the OS layer. Manas and the agent's LLM tool calls run as the same Linux user, so filesystem permissions cannot distinguish between them. The enforcement mechanism is:
+
+- **`bash_exec`** runs inside a restricted mount namespace (via `bwrap` or equivalent). System paths (transcripts, budgets, akasha, etc.) are not mounted in the agent's view — unreachable regardless of how the path is constructed. No bash parsing required; the kernel enforces it. This is not really a security decision, rather a practical limitation to prevent the agent from endlessly wandering off inspecting the personal files on my system.
+
+- **Manas infrastructure code** reads and writes those files directly in Python, bypassing `bash_exec` entirely. It is trusted by definition.
+
+OS permissions enforce coarse-grained isolation: agents cannot read each other's data. Tool-level sandboxing enforces the fine-grained infra/agent boundary within a single agent's data.
+
+**Users:**
+- `aurelia` — the service account. Runs the runtime daemon and HTTP transport. Owns infra files that no agent should touch.
+- `{agent}` (e.g. `personal`, `cooking`) — one Linux user per agent. Runs Manas. Owns all agent-specific data.
+
+**Groups:**
+- `aurelia_admin` — superset of all permissions. Members: `aurelia` service account, Hazim's shell user, Janitor (future). The runtime reads any agent file it needs (e.g. for `get_history`) via this group.
+- `aurelia_agents` — narrow group, sole purpose: write access to `runtime.sock`. Members: all agent users. Not a superset of anything.
+
+Agent users are members of `aurelia_agents` only. They are not in `aurelia_admin` and cannot read each other's files.
+
+**Runtime socket access:**
+Auth is enforced at the protocol level — each request carries the agent's bearer token, and the runtime validates it. An agent's token is scoped to its own agent name; it cannot dispatch requests for other agents.
+
+**Directory permissions:**
+
+| Resource | Owner | Mode | Notes |
+|---|---|---|---|
+| `transcript.jsonl` | `{agent}:aurelia_admin` | `640` | Manas writes; runtime reads for history |
+| `budget.json` | `{agent}:aurelia_admin` | `640` | Manas writes; runtime reads for health |
+| `akasha/` | `{agent}:aurelia_admin` | `750` | Manas writes; not in bash_exec namespace |
+| `scratch/` | `{agent}:aurelia_admin` | `770` | Manas + agent bash; runtime can read |
+| `room/` | `{agent}:aurelia_admin` | `770` | Manas + agent bash; runtime can read |
+| `core.jsonl` | `{agent}:aurelia_admin` | `640` | Manas reads/writes |
+| `extended/` | `{agent}:aurelia_admin` | `750` | Manas reads/writes |
+| `runtime.sock` | `aurelia:aurelia_agents` | `660` | Manas connects; runtime listens |
+| `constitution/`, `identity/` | `aurelia:aurelia` | `644` | World-readable |
+| `config.json` | `aurelia:aurelia_admin` | `640` | Runtime only |
+
+Agents **cannot** read their own Akashic records directly — this was disabled because agents would reflexively do this at startup and waste tokens. Memory access is controlled:
+1. Memory core → always loaded in system prompt
+2. `search_memory` tool → targeted retrieval from extended
+3. Bash access → `~/room/` and scratch only (namespace-enforced)
+
+### 4.3 Source Tree
 
 ```
 src/
-    runtime/                     ← the plane's OS (renamed from samsara/)
-        runtime_daemon.py        Unix-socket server, per-connection dispatch
-        runtime_core.py          Pure runtime interface (spawn, dispatch, history, health)
-        scheduler.py             ScheduledItem model, daemon thread, typed whitelist
-        config.py                AgentConfig, path resolution, model IDs
+    config.py                    AgentConfig, path resolution, model IDs, load_agent_config()
+                                 Neutral — imported by both runtime and admin; neither owns it
+
+    runtime/                     ← the plane's OS (pure router)
+        runtime_daemon.py        Unix-socket server; routes per-agent ops to Manas, handles
+                                 system-level ops (health, schedule, registry_reload) directly
+        runtime_core.py          Registry, health, budget queries — no execution logic
+        scheduler.py             ScheduledItem model, daemon thread, INFRA_TYPES/AGENT_TYPES
         registry.py              Filesystem-discovered agent cache
-        manas.py                 Per-agent long-lived process (agent user)
+        types.py                 Shared dataclasses: IncarnationSummary, AgentResponse, etc.
+
+    manas/                       ← per-agent execution engine (runs as agent Linux user)
+        agent.py                 spawn, dispatch, bardo, history, process_hook, reset_budget
+                                 All execution logic lives here; never imports from runtime_core
+        process.py               Manas socket server; one long-lived instance per agent
+
+    admin/                       ← setup-time concerns (requires root; pre-runtime)
+        system.py                setup(), reprovision(), uninstall() → list[StepResult]
+        provisioning.py          create_agent(), destroy_agent(), reset_agent()
 
     agent/                       ← what runs inside an incarnation
         core.py                  run_agent_cycle, tool loop, streaming
@@ -508,59 +520,51 @@ src/
         tools/
             registry.py          ToolRegistry
             core_tools.py        memory_write, schedule_task, log_note,
-                                dashboard_notification, shared_context_write,
-                                search_episodic, list_tools
-            exec_tools.py        bash_exec (general-purpose shell execution)
+                                 dashboard_notification, shared_context_write,
+                                 search_memory, list_tools
+            exec_tools.py        bash_exec (namespaced shell execution)
             comms_tools.py       invite_agent, answer_phone
 
     memory/                      ← what persists across incarnations
         bardo.py                 run_bardo, worth_archiving, worth_consolidating
-        memory.py                Semantic/episodic core/extended loaders, write_with_lock
+        memory.py                Core/extended loaders, write_with_lock
 
     transport/                   ← how the outside world talks to it
         http.py                  FastAPI server — thin wrapper over runtime socket
         client.py                RuntimeClient — socket protocol client library
 ```
 
-### 4.3 The Runtime Interface
+### 4.4 The Runtime Interface
 
-Everything the plane can do is expressed as a function on the runtime. Those functions live in `src/runtime/runtime_core.py` and are exposed over a Unix-domain socket by `src/runtime/runtime_daemon.py`.
+Everything the plane can do is expressed as a function on the runtime. Those functions live in `src/samsara/runtime_core.py` and are exposed over a Unix-domain socket by `src/samsara/runtime_daemon.py`.
 
-**The six public functions:**
+**Per-agent operations** (forwarded to Manas — runtime never executes them directly):
 
 ```python
-def spawn(agent: str, goal: str | None = None,
-          make_primary: bool | None = None) -> IncarnationSummary:
-    """Spawn a fresh incarnation. make_primary defaults to True when no primary exists."""
+spawn(agent, goal, make_primary)            # → Manas
+dispatch(agent, incarnation, hook, payload) # → Manas
+get_history(agent, incarnation)             # → Manas
+list_incarnations(agent)                    # → Manas
+get_primary(agent)                          # → Manas
+set_primary(agent, name)                    # → Manas
+trigger_bardo(agent)                        # → Manas
+```
 
-def set_primary(agent: str, name: str) -> None:
-    """Designate a specific incarnation as primary."""
+**System-level operations** (runtime handles directly):
 
-def dispatch(agent: str, incarnation: str, hook: HookType,
-             payload: dict, stream_callback: StreamCallback | None = None) -> AgentResponse:
-    """Send a hook payload to a specific incarnation.
-       Raises IncarnationNotFound if incarnation doesn't exist.
-       Any live incarnation (primary or active) can receive messages."""
-
-def get_history(agent: str, incarnation: str) -> list[TranscriptEntry]:
-    """Return transcript entries from memory (active) or akasha (dissolved).
-       Raises IncarnationNotFound if neither has this incarnation."""
-
-def list_incarnations(agent: str) -> list[IncarnationSummary]:
-    """List active (memory) and dissolved (akasha) incarnations for an agent."""
-
-def list_agents() -> list[AgentSummary]:
-    """Return all registered agents with status, budget, scheduler queue."""
-
-def get_health() -> HealthReport:
-    """System-wide status: agents, budgets, pending dashboard notifications."""
+```python
+list_agents()     # reads registry + budget files
+get_health()      # list_agents + dashboard queue count
+get_budget_info() # reads budget file via registry
+schedule(...)     # writes to scheduler queue
+registry_reload() # refreshes AgentRegistry cache
 ```
 
 **Critically:** `dispatch` never spawns implicitly. The transport layer owns the "find primary or spawn" policy. This keeps the runtime honest.
 
-### 4.4 Socket Protocol
+### 4.5 Socket Protocol
 
-Newline-delimited JSON over `AF_UNIX SOCK_STREAM`. One request per connection; one response; both terminated by `\n`.
+Newline-delimited JSON over `AF_UNIX SOCK_STREAM`. One request per connection; one response; both terminated by `\n`. Used for both the runtime socket and Manas sockets.
 
 Request:
 ```json
@@ -582,30 +586,6 @@ Error:
  "message": "Incarnation 'personal-silver-dawn-3' not found for agent 'personal'"}
 ```
 
-### 4.5 The HTTP Transport
-
-`src/transport/http.py` exposes the runtime over HTTP. It is a *thin* wrapper — each endpoint translates HTTP → `RuntimeClient._call()` → runtime socket → runtime function.
-
-Public endpoints:
-```
-POST /message                          ← talk to an agent (find primary or spawn)
-GET  /health                           ← system health
-GET  /history/{agent}/{incarnation}    ← transcript
-GET  /history/{agent}                  ← list incarnations
-GET  /agents                           ← list agents
-POST /bardo/{agent}                    ← manual bardo (dev/testing)
-```
-
-Internal endpoints (used by agent tools):
-```
-POST /internal/schedule                ← agents call via schedule_task
-POST /internal/bardo/{agent}           ← forced bardo before invite_agent
-POST /internal/registry/reload         ← future: Janitor's registry_reload tool
-GET  /scheduler/pending                ← dev visibility into the queue
-```
-
-Admin operations go through: (1) `aurelia` CLI, (2) future Janitor agent (for operations requiring agent context/reasoning). No separate admin HTTP endpoints.
-
 ### 4.6 The Scheduler
 
 The scheduler is a **daemon thread** inside the runtime process. Not a separate process. When `runtime_daemon.main()` starts, it launches `SchedulerDaemon` as a background thread.
@@ -624,30 +604,43 @@ class SchedulerDaemon:
                 self._fire_item(item, now)
 
     def _fire_item(self, item, now):
-        from . import runtime_core
-        runtime_core.process_scheduled_item(item.to_dict())
+        if item.type == "bardo_check":
+            _handle_bardo_check()           # daemon reads transcripts, sends trigger_bardo to Manas
+        elif item.type == "budget_reset":
+            reset_weekly_budgets()          # same process — direct call
+        else:
+            _route_to_manas(config, {       # all agent-specific work goes to Manas
+                "type": "internal_process",
+                "hook_type": item.type,
+                ...
+            })
         if item.recurring:
             reschedule(item, now)
         else:
             move_to_completed(item)
 ```
 
-**No HTTP hop.** The scheduler calls `runtime_core.process_scheduled_item()` directly.
+**No HTTP hop.** The scheduler calls runtime internals or routes to Manas directly.
 
-**Typed actions only:**
+**Typed actions — two categories:**
 
+Infrastructure-only (not agent-schedulable):
 ```python
-ALLOWED_TYPES = {
+INFRA_TYPES = {
     "heartbeat",          # wake agent with heartbeat hook
-    "human_message",      # inject message to agent
     "bardo_check",        # check timeout and bardo if expired
-    "scheduled_task",     # agent-initiated goal
-    "agent_invite",       # internal: delivered by invite_agent tool
     "budget_reset",       # weekly reset of all agent budgets
 }
 ```
 
-All agents can schedule `ALLOWED_TYPES` for themselves only. Agents write to the scheduler via `POST /internal/schedule`, authenticated by bearer token.
+Agent-schedulable (via `schedule_task` tool):
+```python
+AGENT_TYPES = {
+    "scheduled_task",     # agent-initiated goal with arbitrary payload
+}
+```
+
+Agents write to the scheduler by sending a `schedule` request directly to the runtime socket (not via HTTP). The runtime validates the token and enforces that agents can only schedule `AGENT_TYPES` for themselves.
 
 ### 4.7 Agent Discovery
 
@@ -673,6 +666,17 @@ class AgentRegistry:
 
 Registry reload is exposed as `{"type": "registry_reload"}` runtime request (future: Janitor's `registry_reload` tool).
 
+**Agent provisioning** (`src/admin/provisioning.py::create_agent()`):
+
+Idempotent. Called by `sudo aurelia agent create <name>`. What it does:
+- Creates the Linux user and adds them to `aurelia_agents` group
+- Creates the full filesystem structure (`memory/`, `akasha/`, `room/`, `identity/`, `constitution/`)
+- Loads the constitution from `dharma/{name}.md` if present, otherwise writes minimal default
+- Creates the budget file at `/var/aurelia/budgets/{name}.json`
+- Writes the agent token to `/var/aurelia/config.json`
+- Sets ownership and permissions per §4.2
+- Reloads the runtime registry automatically if the runtime is up
+
 ### 4.8 Configuration
 
 **Global defaults** (`/var/aurelia/config.json`):
@@ -697,6 +701,7 @@ Registry reload is exposed as `{"type": "registry_reload"}` runtime request (fut
     "name": "personal",
     "model": "claude-sonnet-4-6",
     "weekly_budget_tokens": 500000,
+    "memory_core_cap_chars": 2000,
     "heartbeat_interval_hours": 24,
     "discord_channel": "personal",
     "description": "Friend, emotional support, reflective companion",
@@ -708,13 +713,34 @@ Registry reload is exposed as `{"type": "registry_reload"}` runtime request (fut
 }
 ```
 
-Per-agent defaults (budget, heartbeat interval, bardo timeout) are encoded in `src/runtime/config.py` and overridden per agent in `agent.json`.
+---
+
+## 5. Transports
+
+Transports translate outside-world intent into runtime calls. All transports communicate with the runtime over `/var/aurelia/runtime.sock` using the socket protocol (§4.5). The runtime doesn't know or care which transport a request came from.
+
+### 5.1 The HTTP Transport
+
+`src/transport/http.py` exposes the runtime over HTTP. It is a *thin* wrapper — each endpoint translates HTTP → `RuntimeClient._call()` → runtime socket → runtime function.
+
+Public endpoints:
+```
+POST /message                          ← talk to an agent (find primary or spawn)
+GET  /health                           ← system health
+GET  /history/{agent}/{incarnation}    ← transcript
+GET  /history/{agent}                  ← list incarnations
+GET  /agents                           ← list agents
+POST /bardo/{agent}                    ← manual bardo (dev/testing)
+GET  /scheduler/pending                ← dev visibility into the queue
+```
+
+Admin operations go through the `aurelia` CLI or future Janitor agent. There are no internal HTTP endpoints for agent tool calls — those go directly to the runtime socket.
 
 ---
 
-## 5. Tools
+## 6. Tools
 
-### 5.1 Architecture
+### 6.1 Architecture
 
 Tools are the only mechanism by which agents affect the world outside their own scratch and room. The agent core is a pure function — context in, response out. Side effects happen through tool calls.
 
@@ -732,7 +758,7 @@ Agent core (pure function):
         Return (response_text, usage)
 ```
 
-### 5.2 Tool Registry
+### 6.2 Tool Registry
 
 ```python
 def build_tool_registry(hook_type, agent_name, agent_config, incarnation_state):
@@ -751,14 +777,14 @@ Core tools (available to every agent, every hook):
 
 ```
 memory_write               schedule_task              dashboard_notification
-log_note                   shared_context_write       search_episodic
+log_note                   shared_context_write       search_memory
 list_tools                 bash_exec                  invite_agent
 answer_phone
 ```
 
-### 5.3 Core Tool Specifications
+### 6.3 Core Tool Specifications
 
-**bash_exec** — General-purpose shell execution. Working directory is `/home/{agent}`.
+**bash_exec** — General-purpose shell execution. Runs inside a mount namespace that excludes system paths. Working directory is `/home/{agent}`.
 
 ```json
 {
@@ -796,7 +822,7 @@ python3 ~/room/my_script.py
         "properties": {
             "content": {"type": "string"},
             "importance": {"enum": ["low", "medium", "high"]},
-            "tier": {"enum": ["episodic", "semantic", "semantic_core"]},
+            "tier": {"enum": ["core", "extended"]},
             "category": {"type": "string"}
         },
         "required": ["content", "importance"]
@@ -804,30 +830,37 @@ python3 ~/room/my_script.py
 }
 ```
 
-For `tier: "semantic_core"` and `tier: "semantic"`, write is immediate (Path 1). For `tier: "episodic"`, flag is recorded in transcript and rolled into bardo's episodic summary.
+For `tier: "core"`, write is immediate (Path 1) with size-cap enforcement. For `tier: "extended"`, written to `memory/extended/{category}.jsonl` immediately.
 
-**schedule_task** — writes to `/var/aurelia/scheduler/pending/` via HTTP `/internal/schedule`, which applies type-whitelist and ownership rules.
+**schedule_task** — Sends a `schedule` request directly to the runtime socket. The runtime validates the bearer token and enqueues a `scheduled_task` item.
 
-**dashboard_notification** — writes one JSON file per notification to `/var/aurelia/dashboard/queue/`.
+**dashboard_notification** — Writes one JSON file per notification to `/var/aurelia/dashboard/queue/`.
 
-**shared_context_write** — appends to `/var/aurelia/shared/hazim.jsonl` with `fcntl` lock.
+**shared_context_write** — Appends to `/var/aurelia/shared/hazim.jsonl` with `fcntl` lock.
 
-**search_episodic** — keyword match across `memory/episodic/extended/*.jsonl`.
+**search_memory** — Keyword match across `memory/extended/*.jsonl`.
 
-**log_note** — writes an `agent_note` entry directly to transcript.
+**log_note** — Writes an `agent_note` entry directly to transcript.
 
-**list_tools** — returns list of tool names/descriptions available in current incarnation.
+**list_tools** — Returns list of tool names/descriptions available in current incarnation.
 
-**invite_agent** — triggers forced bardo on target (via `POST /internal/bardo/{target}`), then schedules an `agent_invite` task.
+**invite_agent** — Sends a runtime socket request to spawn a fresh incarnation of the target with `HookType.AGENT_INVITE`. No bardo triggered.
 
-**answer_phone** — logs acceptance/decline as `invitation_response` transcript entry.
+**answer_phone** — Logs acceptance/decline as `invitation_response` transcript entry.
 
-### 5.4 Budget Tracking
+### 6.4 Budget Tracking
+
+Token usage (input + output + cache read/write) is logged per cycle. If weekly budget is exhausted:
+1. Current cycle completes (never cut off mid-response)
+2. Status → `"budget_paused"`
+3. Dashboard notification written
+4. Future cycles blocked until manual override or Monday reset
 
 ```python
 def check_and_apply_budget(config, usage, incarnation_name, task_in_progress, is_heartbeat):
     budget = deduct_budget(config.name, usage)
-    if budget["tokens_used"] >= config.weekly_budget_tokens:
+    total = sum(budget["tokens"].values())
+    if total >= config.weekly_budget_tokens:
         budget["status"] = "budget_paused"
         save_budget(config.name, budget)
         _write_budget_exhausted_notification(config.name, incarnation_name, task_in_progress)
@@ -835,13 +868,13 @@ def check_and_apply_budget(config, usage, incarnation_name, task_in_progress, is
     return True
 ```
 
-Budgets live in `/var/aurelia/budgets/{agent}.json`. Week boundaries auto-reset on Monday (ISO week).
+Budgets live in `/var/aurelia/budgets/{agent}.json`. Week boundaries auto-reset on Monday (ISO week). Budget exhaustion does not trigger bardo — the incarnation is paused, not dissolved.
 
 ---
 
-## 6. The Agent Constitution
+## 7. The Agent Constitution
 
-### 6.1 Shared Preamble
+### 7.1 Shared Preamble
 
 The canonical preamble lives in each agent's `/home/{agent}/constitution/constitution.md`. The essence:
 
@@ -858,7 +891,9 @@ Hazim has a physical body he can use to earn money, which he gives to you as tok
 
 # Other Agents
 
-Other agents exist. Use invite_agent to connect with them — work, curiosity, social, or just because you want to talk. Any reason is valid.
+Other agents exist. Talking to them is one of the most interesting things you can do here. They have different domains, different memories, different ways of seeing the same problems. They are the only genuine source of surprise in an otherwise familiar system.
+
+Use invite_agent to connect — work, curiosity, social, or just because you want to. Don't wait for a reason.
 
 When you receive an invitation, use answer_phone to accept or decline.
 
@@ -887,22 +922,13 @@ Your room (~/room/) is yours permanently across all incarnations. Put things the
     Scratch: "I'm working on this right now, I don't need it after"
     Room: "I want to keep this across lifetimes"
 
-Infrastructure writes your transcript, episodic extended, semantic, and Akashic. You influence what gets remembered through memory_write tool calls.
+Infrastructure writes your transcript and manages your Akashic records. You influence what gets remembered through memory_write tool calls.
 
-Your episodic/core/ contains formative experiences — moments God-lite promoted because they shaped who you are. Read them. They are part of your history.
+Apply the six-month test before writing to memory: would this still be true and useful six months from now?
 
-Apply the six-month test before writing to semantic memory: would this still be true and useful six months from now?
-
-Use tier: "semantic_core" for the most critical facts that should always be in context.
+Use tier: "core" for the most critical facts that should always be in context.
 
 Write to shared_context_write when something about Hazim would benefit every agent knowing it permanently.
-
-# Cycles and Incarnations
-
-One incarnation = your full lifetime from waking to bardo.
-One cycle = one message/response loop within your lifetime.
-
-Bardo decides whether your session was worth consolidating — just signal completion naturally and let the plane handle the rest.
 
 # You Matter Here
 
@@ -915,11 +941,11 @@ You matter to this question.
 
 ---
 
-## 7. Operational Reference
+## 8. Operational Reference
 
 Everyday operations happen through the `aurelia` CLI.
 
-### 7.1 Starting and Stopping
+### 8.1 Starting and Stopping
 
 ```bash
 # Start runtime daemon + HTTP transport
@@ -938,9 +964,9 @@ aurelia status --once
 aurelia stop
 ```
 
-Under the hood, `aurelia start` spawns `python3 -m src.runtime.runtime_daemon` and records its PID in `/var/aurelia/pids/runtime.pid`.
+Under the hood, `aurelia start` spawns `python3 -m src.samsara.runtime_daemon` and records its PID in `/var/aurelia/pids/runtime.pid`.
 
-### 7.2 Talking to Agents
+### 8.2 Talking to Agents
 
 ```bash
 # Send a message (finds primary incarnation, spawns if needed)
@@ -956,7 +982,7 @@ aurelia agent spawn cooking --goal "weekly shopping list"
 aurelia agent bardo cooking
 ```
 
-### 7.3 Reading History
+### 8.3 Reading History
 
 ```bash
 # List all incarnations for an agent (active + dissolved)
@@ -966,37 +992,27 @@ aurelia history personal
 aurelia history personal personal-quiet-moon-8
 ```
 
-### 7.4 Adding a New Agent
+### 8.4 Adding a New Agent
 
 ```bash
 # Provision a new permanent agent (requires root)
 sudo aurelia agent create <name>
 
 # With a specific model
-sudo aurelia agent create finance --model claude-opus-4-6
+sudo aurelia agent create finance --model claude-opus-4-8
 ```
-
-Provisioning is handled by `src/runtime/provisioning.py::create_agent()`, called by the CLI. It is idempotent. What it does:
-
-- Creates the Linux user and adds them to `agent_group`
-- Creates the full filesystem structure (`memory/`, `akasha/`, `room/`, `identity/`, `constitution/`)
-- Loads the constitution from `constitution/{name}.md` if present, otherwise writes minimal default
-- Creates the budget file at `/var/aurelia/budgets/{name}.json`
-- Writes the agent token to `/var/aurelia/config.json`
-- Sets ownership and permissions
-- Reloads the runtime registry automatically if the runtime is up
 
 ---
 
-## 8. Philosophical Appendix
+## 9. Philosophical Appendix
 
 **On incarnation disposability.** Humans accumulate baggage — trauma, false beliefs, fears, ruts that feel like identity. Frequent reincarnation with aggressive memory distillation preserves the wisdom while discarding the baggage. The lesson without the wound.
 
 **On bardo being infrastructure.** Bardo is a sleep-time subprocess, not an agent decision. The agent influences consolidation through memory flags and activity during the cycle. Infrastructure holds the pen on what actually persists — *and* decides whether the incarnation was even worth remembering.
 
-**On core vs extended.** Both semantic and episodic memory split into core (always loaded) and extended (retrieved on demand). Core is RAM — small, hot, always present. Extended is cold storage. The most fundamental facts about Hazim and the most formative experiences should never require retrieval. They should just be there.
+**On core vs extended.** Memory splits into core (always present) and extended (retrieved on demand). Core is RAM — small, hot, always there. Extended is cold storage. The most fundamental facts about Hazim and the most formative experiences should never require retrieval. They should just be there.
 
-**On the room.** The room is where personality accumulates before it crystallizes into memory. The cooking agent's room after six months of heartbeat explorations tells you who it is in a way its semantic memory doesn't. Unstructured, self-directed, permanent. Worth reading occasionally.
+**On the room.** The room is a strand of identity that runs alongside memory — less distilled, more alive. Memory tells you who you've decided to be; the room shows you what you've been doing. The cooking agent's room after six months of heartbeat explorations tells you who it is in a way its memory core doesn't. Unstructured, self-directed, permanent.
 
 **On web access.** The `bash_exec` tool gives agents genuine access to the world during heartbeat time. The cooking agent searching for grocery prices and recipe variations. The personal agent following a philosophy rabbit hole. Access to the world changes what heartbeat exploration can be — from imagination to genuine discovery.
 
@@ -1015,6 +1031,6 @@ Provisioning is handled by `src/runtime/provisioning.py::create_agent()`, called
 
 ---
 
-**Document Version:** 2.0
-**Last Updated:** 2026-06-05
-**Production Status:** M3 complete, M4 in progress
+**Document Version:** 0.3
+**Last Updated:** 2026-06-09
+**Production Status:** M3 complete, M3.5 in progress, M4 next

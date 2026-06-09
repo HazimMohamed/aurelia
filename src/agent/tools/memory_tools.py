@@ -1,4 +1,4 @@
-"""Curated tools for reading samsara-managed memory (akasha and episodic extended)."""
+"""Curated tools for reading runtime-managed memory (akasha and memory/extended)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ...samsara.config import AgentConfig
+from ...config import AgentConfig
 
 
 def _list_incarnations(config: AgentConfig) -> dict[str, Any]:
@@ -48,9 +48,9 @@ def _read_incarnation(config: AgentConfig, incarnation_id: str) -> dict[str, Any
         return {"error": str(e)}
 
 
-def _search_episodic(config: AgentConfig, query: str) -> dict[str, Any]:
-    """Search extended episodic memory files for entries matching query."""
-    ext_dir = config.episodic_extended_dir
+def _search_memory_extended(config: AgentConfig, query: str) -> dict[str, Any]:
+    """Search memory/extended/ files for entries matching query."""
+    ext_dir = config.memory_extended_dir
     if not ext_dir.exists():
         return {"matches": [], "searched_files": 0}
 
@@ -78,11 +78,11 @@ def _search_episodic(config: AgentConfig, query: str) -> dict[str, Any]:
     return {"matches": matches, "count": len(matches), "searched_files": files_searched}
 
 
-def _read_semantic_extended(config: AgentConfig, filename: str | None) -> dict[str, Any]:
-    """Read extended semantic memory. filename=None lists available files."""
-    ext_dir = config.semantic_extended_dir
+def _read_memory_extended(config: AgentConfig, filename: str | None) -> dict[str, Any]:
+    """Read memory/extended/ files. filename=None lists available files."""
+    ext_dir = config.memory_extended_dir
     if not ext_dir.exists():
-        return {"files": []} if filename is None else {"error": "no extended semantic memory"}
+        return {"files": []} if filename is None else {"error": "no extended memory"}
 
     if filename is None:
         files = sorted(p.name for p in ext_dir.iterdir() if p.is_file())
@@ -142,24 +142,24 @@ _READ_INCARNATION_SCHEMA = {
     },
 }
 
-_SEARCH_EPISODIC_SCHEMA = {
-    "name": "search_episodic",
-    "description": "Search extended episodic memory for entries matching a query string.",
+_SEARCH_MEMORY_SCHEMA = {
+    "name": "search_memory",
+    "description": "Search memory/extended/ for entries matching a query string. Covers past incarnation summaries and stored memory flags.",
     "input_schema": {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Text to search for across episodic memory files.",
+                "description": "Text to search for across extended memory files.",
             }
         },
         "required": ["query"],
     },
 }
 
-_READ_SEMANTIC_EXTENDED_SCHEMA = {
-    "name": "read_semantic_extended",
-    "description": "Read extended semantic memory files. Pass filename=null to list available files, or a filename to read that file.",
+_READ_MEMORY_EXTENDED_SCHEMA = {
+    "name": "read_memory_extended",
+    "description": "Read memory/extended/ files. Pass filename=null to list available files, or a filename to read that file.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -186,10 +186,10 @@ def register_memory_tools(registry: Any, agent_config: AgentConfig) -> None:
         lambda inp, **ctx: _read_incarnation(agent_config, inp.get("incarnation_id", "")),
     )
     registry.register(
-        _SEARCH_EPISODIC_SCHEMA,
-        lambda inp, **ctx: _search_episodic(agent_config, inp.get("query", "")),
+        _SEARCH_MEMORY_SCHEMA,
+        lambda inp, **ctx: _search_memory_extended(agent_config, inp.get("query", "")),
     )
     registry.register(
-        _READ_SEMANTIC_EXTENDED_SCHEMA,
-        lambda inp, **ctx: _read_semantic_extended(agent_config, inp.get("filename")),
+        _READ_MEMORY_EXTENDED_SCHEMA,
+        lambda inp, **ctx: _read_memory_extended(agent_config, inp.get("filename")),
     )

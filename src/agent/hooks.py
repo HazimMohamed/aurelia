@@ -6,7 +6,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from ..samsara.config import AgentConfig
+from ..config import AgentConfig
 
 
 class HookType(str, Enum):
@@ -18,7 +18,7 @@ class HookType(str, Enum):
 
 BULLETIN_PATH = Path("/var/aurelia/bulletin.jsonl")
 SCHEDULER_PENDING_DIR = Path("/var/aurelia/scheduler/pending")
-_HEARTBEAT_PRACTICES_PATH = Path(__file__).parent.parent.parent / "dharma" / "heartbeat_practices.md"
+_HEARTBEAT_PRACTICES_PATH = Path(__file__).parent.parent.parent / "constitution" / "heartbeat_practices.md"
 
 
 def count_bulletin_unread(agent: AgentConfig) -> int:
@@ -82,23 +82,17 @@ def count_scheduled_now(agent: AgentConfig) -> int:
 def heartbeat_precheck(agent: AgentConfig) -> bool:
     """
     Fast pre-check before doing a full LLM call for heartbeat.
-    Returns True if there is meaningful work to do and budget available.
+    Returns True if budget exists. What the agent does with it is its business.
     """
-    # Budget check — skip heartbeat if paused or below minimum threshold
     try:
         from .budget import get_budget_remaining, is_budget_ok
         if not is_budget_ok(agent):
             return False
-        remaining = get_budget_remaining(agent)
-        if remaining < 1_000:  # Below minimum threshold
+        if get_budget_remaining(agent) < 1_000:
             return False
     except Exception:
         pass  # If budget check fails, allow heartbeat to proceed
-
-    has_unread = count_bulletin_unread(agent) > 0
-    has_scheduled = count_scheduled_now(agent) > 0
-    has_budget = get_budget_remaining(agent) > 1_000
-    return has_unread or has_scheduled or has_budget
+    return True
 
 
 def format_heartbeat_prompt(agent: AgentConfig) -> str:

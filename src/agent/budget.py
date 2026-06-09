@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE, AgentConfig
+from ..config import AGENT_HOME_BASE, AGENT_DATA_BASE, AgentConfig
 
 DASHBOARD_QUEUE_DIR = Path("/var/aurelia/dashboard/queue")
 MINIMUM_BUDGET_THRESHOLD = 1_000
@@ -86,7 +86,7 @@ def save_budget(home: Path, budget: dict[str, Any]) -> None:
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
     try:
-        os.chmod(path, 0o460)
+        os.chmod(path, 0o660)
     except PermissionError:
         pass
 

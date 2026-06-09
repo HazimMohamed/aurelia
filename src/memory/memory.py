@@ -1,4 +1,4 @@
-"""Memory system: semantic core/extended and episodic core/extended writes."""
+"""Memory system: unified core (always loaded) and extended (on demand) writes."""
 
 from __future__ import annotations
 
@@ -9,20 +9,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..samsara.config import AgentConfig
+from ..config import AgentConfig
 
 SHARED_HAZIM_PATH = Path("/var/aurelia/shared/hazim.jsonl")
 SHARED_INTRO_PATH = Path("/var/aurelia/shared/hazim_introduction.md")
 
-# Approximate token cap for semantic core (~500 tokens → ~2000 chars)
-SEMANTIC_CORE_CHAR_CAP = 2000
+# Approximate token cap for memory core (~500 tokens → ~2000 chars)
+MEMORY_CORE_CHAR_CAP = 2000
 
 # Max entries from shared hazim.jsonl to load (by score)
-SHARED_HAZIM_MAX_ENTRIES = 10
+SHARED_HAZIM_MAX_ENTRIES = 100
 SHARED_HAZIM_MAX_CHARS = 2000
 
 # How many days before shared context entries expire
-SHARED_HAZIM_EXPIRY_DAYS = 30
+SHARED_HAZIM_EXPIRY_DAYS = 365
 
 
 def _now_iso() -> str:
@@ -59,34 +59,27 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return entries
 
 
-# ── Semantic memory ──────────────────────────────────────────────────────────────
+# ── Unified memory ────────────────────────────────────────────────────────────
 
-def write_semantic_core(config: AgentConfig, entry: dict[str, Any]) -> None:
-    """Write to semantic core with fcntl lock. Enforces size cap by pruning oldest."""
-    path = config.semantic_core_path
+def write_memory_core(config: AgentConfig, entry: dict[str, Any]) -> None:
+    """Write to memory core with fcntl lock. Enforces size cap by pruning lowest-importance oldest."""
+    path = config.memory_core_path
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Read existing entries
     existing = read_jsonl(path)
-
-    # Add new entry
     existing.append(entry)
 
-    # Enforce approximate size cap
+    importance_rank = {"low": 0, "medium": 1, "high": 2}
     while True:
         total_chars = sum(len(json.dumps(e)) for e in existing)
-        if total_chars <= SEMANTIC_CORE_CHAR_CAP or len(existing) <= 1:
+        if total_chars <= MEMORY_CORE_CHAR_CAP or len(existing) <= 1:
             break
-        # Drop lowest importance or oldest entry
-        # Sort by importance (low=0, medium=1, high=2) then ts — drop first
-        importance_rank = {"low": 0, "medium": 1, "high": 2}
         existing.sort(key=lambda e: (
             importance_rank.get(e.get("importance", "medium"), 1),
             e.get("ts", ""),
         ))
         existing.pop(0)
 
-    # Rewrite file atomically with lock
     with open(path, "w", encoding="utf-8") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
@@ -96,35 +89,31 @@ def write_semantic_core(config: AgentConfig, entry: dict[str, Any]) -> None:
             fcntl.flock(f, fcntl.LOCK_UN)
 
 
-def write_semantic_extended(config: AgentConfig, category: str, entry: dict[str, Any]) -> None:
-    """Write to semantic extended (domain-specific file)."""
+def write_memory_extended(config: AgentConfig, category: str, entry: dict[str, Any]) -> None:
+    """Write to memory extended (per-category file)."""
     if not category:
         category = "general"
-    path = config.semantic_extended_dir / f"{category}.jsonl"
+    path = config.memory_extended_dir / f"{category}.jsonl"
     write_with_lock(path, entry)
 
 
-def load_semantic_core(config: AgentConfig) -> str:
-    """Load and format semantic core for context assembly."""
-    entries = read_jsonl(config.semantic_core_path)
+def load_memory_core(config: AgentConfig) -> str:
+    """Load and format memory core for context assembly."""
+    entries = read_jsonl(config.memory_core_path)
     if not entries:
         return ""
 
-    lines = ["## Semantic Memory (Core — Always Loaded)\n"]
+    lines = ["## Memory (Core — Always Loaded)\n"]
     for entry in entries:
         content = entry.get("content", "")
         importance = entry.get("importance", "")
         category = entry.get("category", "")
-        ts = entry.get("ts", "")
-        tier = entry.get("tier", "")
 
         meta = []
         if importance:
             meta.append(f"importance:{importance}")
         if category:
             meta.append(f"category:{category}")
-        if tier:
-            meta.append(f"tier:{tier}")
 
         meta_str = f" [{', '.join(meta)}]" if meta else ""
         lines.append(f"- {content}{meta_str}")
@@ -132,29 +121,47 @@ def load_semantic_core(config: AgentConfig) -> str:
     return "\n".join(lines)
 
 
-def load_semantic_extended_relevant(config: AgentConfig, query: str, max_chars: int = 1500) -> str:
-    """Load relevant semantic extended entries based on keyword matching."""
-    if not config.semantic_extended_dir.exists():
+def load_memory_extended_relevant(config: AgentConfig, query: str, max_chars: int = 1500) -> str:
+    """Load relevant extended memory entries based on keyword matching."""
+    ext_dir = config.memory_extended_dir
+    if not ext_dir.exists():
         return ""
 
     query_words = set(query.lower().split())
-    matched_entries = []
+    matched: list[tuple[str, str]] = []  # (label, text_line)
 
-    for ext_file in config.semantic_extended_dir.glob("*.jsonl"):
-        entries = read_jsonl(ext_file)
-        for entry in entries:
-            content = entry.get("content", "").lower()
-            if any(word in content for word in query_words):
-                matched_entries.append(entry)
+    for ext_file in sorted(ext_dir.glob("*.jsonl"), reverse=True):
+        for entry in read_jsonl(ext_file):
+            entry_type = entry.get("type", "")
 
-    if not matched_entries:
+            if entry_type == "episodic_summary":
+                summary_data = entry.get("summary", {})
+                if isinstance(summary_data, dict):
+                    searchable = " ".join([
+                        summary_data.get("summary", ""),
+                        " ".join(summary_data.get("topics", [])),
+                        " ".join(summary_data.get("insights", [])),
+                    ]).lower()
+                else:
+                    searchable = str(summary_data).lower()
+                if any(word in searchable for word in query_words):
+                    incarnation = entry.get("incarnation", "unknown")
+                    summary = summary_data.get("summary", "") if isinstance(summary_data, dict) else str(summary_data)
+                    matched.append((f"past:{incarnation}", summary))
+            else:
+                content = entry.get("content", "")
+                if any(word in content.lower() for word in query_words):
+                    category = entry.get("category", "")
+                    label = f"memory:{category}" if category else "memory"
+                    matched.append((label, content))
+
+    if not matched:
         return ""
 
-    lines = ["## Semantic Memory (Extended — Relevant to current topic)\n"]
+    lines = ["## Memory (Extended — Relevant to current topic)\n"]
     total_chars = 0
-    for entry in matched_entries:
-        content = entry.get("content", "")
-        line = f"- {content}"
+    for label, text in matched:
+        line = f"- [{label}]: {text}"
         if total_chars + len(line) > max_chars:
             break
         lines.append(line)
@@ -163,112 +170,18 @@ def load_semantic_extended_relevant(config: AgentConfig, query: str, max_chars: 
     return "\n".join(lines)
 
 
-# ── Episodic memory ───────────────────────────────────────────────────────────
-
-def load_episodic_core(config: AgentConfig) -> str:
-    """Load and format all episodic core entries (formative experiences)."""
-    core_dir = config.episodic_core_dir
-    if not core_dir.exists():
-        return ""
-
-    entries = []
-    for ep_file in sorted(core_dir.glob("*.jsonl")):
-        entries.extend(read_jsonl(ep_file))
-
-    if not entries:
-        return ""
-
-    lines = ["## Episodic Memory (Core — Formative Experiences)\n"]
-    for entry in entries:
-        subtype = entry.get("subtype", entry.get("type", ""))
-        note = entry.get("note", entry.get("content", ""))
-        incarnation = entry.get("incarnation", "")
-        ts = entry.get("ts", "")
-
-        label = {
-            "formative_success": "Success",
-            "formative_error": "Error",
-            "formative_moment": "Moment",
-        }.get(subtype, subtype or "Note")
-
-        line = f"- [{label}]"
-        if incarnation:
-            line += f" (from {incarnation})"
-        line += f": {note}"
-        lines.append(line)
-
-    return "\n".join(lines)
-
-
-def load_episodic_extended_relevant(config: AgentConfig, query: str, limit: int = 3) -> str:
-    """Load relevant episodic extended entries based on keyword matching."""
-    extended_dir = config.episodic_extended_dir
-    if not extended_dir.exists():
-        return ""
-
-    query_words = set(query.lower().split())
-    results = []
-
-    for ep_file in sorted(extended_dir.glob("*.jsonl"), reverse=True):
-        entries = read_jsonl(ep_file)
-        for entry in entries:
-            summary_data = entry.get("summary", {})
-            if isinstance(summary_data, dict):
-                text = " ".join([
-                    summary_data.get("summary", ""),
-                    " ".join(summary_data.get("topics", [])),
-                    " ".join(summary_data.get("insights", [])),
-                ]).lower()
-            else:
-                text = str(summary_data).lower()
-
-            if any(word in text for word in query_words):
-                results.append(entry)
-                if len(results) >= limit:
-                    break
-
-        if len(results) >= limit:
-            break
-
-    if not results:
-        return ""
-
-    lines = ["## Episodic Memory (Extended — Relevant to current topic)\n"]
-    for entry in results:
-        incarnation = entry.get("incarnation", "unknown")
-        summary_data = entry.get("summary", {})
-        if isinstance(summary_data, dict):
-            summary = summary_data.get("summary", "")
-        else:
-            summary = str(summary_data)
-        if summary:
-            lines.append(f"**{incarnation}:** {summary}")
-
-    return "\n".join(lines)
-
-
-def search_episodic(config: AgentConfig, query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Keyword search across episodic/extended for matching entries."""
-    extended_dir = config.episodic_extended_dir
-    if not extended_dir.exists():
+def search_memory_extended(config: AgentConfig, query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Keyword search across memory/extended/ for matching entries."""
+    ext_dir = config.memory_extended_dir
+    if not ext_dir.exists():
         return []
 
     query_words = set(query.lower().split())
     results = []
 
-    for ep_file in sorted(extended_dir.glob("*.jsonl"), reverse=True):
-        entries = read_jsonl(ep_file)
-        for entry in entries:
-            summary_data = entry.get("summary", {})
-            if isinstance(summary_data, dict):
-                text = " ".join([
-                    summary_data.get("summary", ""),
-                    " ".join(summary_data.get("topics", [])),
-                    " ".join(summary_data.get("insights", [])),
-                ]).lower()
-            else:
-                text = str(summary_data).lower()
-
+    for ext_file in sorted(ext_dir.glob("*.jsonl"), reverse=True):
+        for entry in read_jsonl(ext_file):
+            text = json.dumps(entry).lower()
             if any(word in text for word in query_words):
                 results.append(entry)
                 if len(results) >= limit:

@@ -1,10 +1,11 @@
 """Manas — the per-agent long-lived process. The Ālayavijñāna.
 
-One Manas process per agent, running as the agent's Linux user. Samsara routes
-dispatches here via Unix socket; Manas spawns incarnation threads and returns
-results. Bash_exec runs without sudo because the process already is the agent.
+One Manas process per agent, running as the agent's Linux user. The runtime
+daemon routes dispatches here via Unix socket; Manas runs incarnation cycles
+and returns results. Bash_exec needs no sudo because the process already is
+the agent.
 
-Entry point: python -m src.samsara.manas <agent_name>
+Entry point: python -m src.manas <agent_name>
 Socket:      /var/aurelia/run/<agent>/manas.sock  (agent:aurelia_admin 660)
 PID file:    /var/aurelia/run/<agent>/manas.pid
 """
@@ -23,9 +24,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from .config import AGENT_RUN_BASE, load_agent_config
-from . import runtime_core as runtime
+from ..config import AGENT_RUN_BASE, load_agent_config
 from ..agent.hooks import HookType
+from . import agent as manas_agent
 
 
 def _serialize(obj: Any) -> Any:
@@ -126,8 +127,8 @@ class Manas:
                         conn.sendall(json.dumps(frame).encode() + b"\n")
 
                     try:
-                        result = runtime.dispatch(
-                            agent=request["agent"],
+                        result = manas_agent.dispatch(
+                            config=self.config,
                             incarnation=request["incarnation"],
                             hook=HookType(request["hook"]),
                             payload=request.get("payload", {}),
@@ -159,41 +160,52 @@ class Manas:
 
         match req_type:
             case "spawn":
-                return runtime.spawn(agent=request["agent"], goal=request.get("goal"))
+                return manas_agent.spawn(
+                    config=self.config,
+                    goal=request.get("goal"),
+                    make_primary=request.get("make_primary"),
+                )
             case "dispatch":
-                return runtime.dispatch(
-                    agent=request["agent"],
+                return manas_agent.dispatch(
+                    config=self.config,
                     incarnation=request["incarnation"],
                     hook=HookType(request["hook"]),
                     payload=request.get("payload", {}),
                 )
             case "get_history":
-                return runtime.get_history(agent=request["agent"], incarnation=request["incarnation"])
+                return manas_agent.get_history(
+                    config=self.config,
+                    incarnation=request["incarnation"],
+                )
             case "list_incarnations":
-                return runtime.list_incarnations(agent=request["agent"])
+                return manas_agent.list_incarnations(config=self.config)
             case "get_primary" | "get_active":
-                return {"primary": runtime.get_primary(request["agent"])}
+                return {"primary": manas_agent.get_primary(self.config)}
             case "set_primary":
-                runtime.set_primary(request["agent"], request["name"])
+                manas_agent.set_primary(self.config, request["name"])
                 return {"status": "ok"}
-            case "get_budget_info":
-                return runtime.get_budget_info(request["agent"])
             case "trigger_bardo":
-                agent = request["agent"]
-                primary = runtime.get_primary(agent)
+                primary = manas_agent.get_primary(self.config)
                 if not primary:
-                    return {"status": "no_active", "agent": agent}
-                return runtime.trigger_bardo(agent, primary)
+                    return {"status": "no_active", "agent": self.config.name}
+                return manas_agent.trigger_bardo(self.config, primary)
             case "internal_process":
-                from .runtime_daemon import _dispatch_internal_process
-                return _dispatch_internal_process(request)
+                return manas_agent.process_hook(
+                    config=self.config,
+                    hook_type=request["hook_type"],
+                    goal=request.get("goal", ""),
+                    payload=request.get("payload") or {},
+                    rebirth_from=request.get("rebirth_from"),
+                )
+            case "budget_reset":
+                return manas_agent.reset_budget(self.config)
             case _:
                 raise ValueError(f"Unknown request type: {req_type!r}")
 
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python -m src.samsara.manas <agent_name>")
+        print("Usage: python -m src.manas <agent_name>")
         sys.exit(1)
     Manas(sys.argv[1]).run()
 

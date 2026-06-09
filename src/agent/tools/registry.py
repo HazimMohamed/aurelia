@@ -44,7 +44,6 @@ def build_tool_registry(
     agent_name: str,
     agent_config: Any,
     incarnation_state: dict[str, Any],
-    api_url: str = "http://localhost:8000",
 ) -> ToolRegistry:
     """Build and return the tool registry for a given incarnation context."""
     from .core_tools import register_core_tools
@@ -57,18 +56,18 @@ def build_tool_registry(
     registry = ToolRegistry()
 
     # Core tools always available
-    register_core_tools(registry, agent_config, incarnation_state, api_url)
+    register_core_tools(registry, agent_config, incarnation_state)
 
     # bash_exec: blocking commands; process_*: background/persistent processes
     register_exec_tools(registry, agent_config)
     register_process_tools(registry, agent_config, incarnation=incarnation_state.get("name", "unknown"))
 
-    # Memory access tools (curated — no raw bash paths to samsara dirs needed)
+    # Memory access tools (curated — no raw bash paths to runtime dirs needed)
     register_memory_tools(registry, agent_config)
 
     # Communication tools for most hooks
     if hook_type in ("human_message", "heartbeat", "scheduled_task", "agent_invite"):
-        register_comms_tools(registry, agent_config, incarnation_state, api_url)
+        register_comms_tools(registry, agent_config, incarnation_state)
 
     # Agent-specific tools
     register_agent_tools(
@@ -76,7 +75,6 @@ def build_tool_registry(
         agent_name,
         agent_config=agent_config,
         incarnation_state=incarnation_state,
-        api_url=api_url,
     )
 
     return registry

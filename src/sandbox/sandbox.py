@@ -28,8 +28,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE, AGENT_RUN_BASE, AgentConfig, MODEL_SONNET
-from ..samsara.provisioning import (
+from ..config import AGENT_HOME_BASE, AGENT_DATA_BASE, AGENT_RUN_BASE, AgentConfig, MODEL_SONNET
+from ..admin.provisioning import (
     SeedKarma,
     _provision,
     _standup_agent,
@@ -106,7 +106,7 @@ def _standup_sandbox(
 
 def _teardown_sandbox(agent: SandboxAgent) -> None:
     """Tear down an agent and wipe its slot clean."""
-    from ..samsara.provisioning import _remove_from_config
+    from ..admin.provisioning import _remove_from_config
 
     _remove_from_config(agent.name)
 

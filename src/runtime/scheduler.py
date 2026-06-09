@@ -15,24 +15,21 @@ FAILED_DIR = SCHEDULER_BASE / "failed"
 import os
 SCHEDULER_CHECK_INTERVAL = int(os.environ.get("AURELIA_SCHEDULER_INTERVAL", "60"))
 
-# Typed action whitelist (infra code, agents cannot extend)
-ALLOWED_TYPES = {
+# Infra-only scheduler types — triggered by the runtime, never by agents
+INFRA_TYPES = {
     "heartbeat",
-    "human_message",
     "bardo_check",
-    "memory_curation",
-    "episodic_reindex",
-    "scheduled_task",
-    "agent_invite",
     "budget_reset",
-}
-
-JANITOR_ONLY_TYPES = {
     "registry_reload",
     "agent_bardo_forced",
-    "semantic_consolidation",
     "system_health_check",
     "incarnation_undissolve",
+}
+
+# Agent-schedulable types — agents can schedule these for themselves or others
+AGENT_TYPES = {
+    "scheduled_task",
+    "agent_invite",
 }
 
 
@@ -229,6 +226,60 @@ def count_pending_for_agent(agent_name: str) -> int:
     return count
 
 
+def _handle_bardo_check() -> list[str]:
+    """Check all agents for bardo timeout. Sends trigger_bardo to Manas for timed-out agents."""
+    from datetime import datetime, timezone
+    from ..config import AGENT_DATA_BASE, load_agent_config
+    from .runtime_daemon import _is_manas_live, _route_to_manas
+    from ..agent.transcript import read_entries
+
+    triggered = []
+    if not AGENT_DATA_BASE.exists():
+        return triggered
+
+    for agent_dir in AGENT_DATA_BASE.iterdir():
+        try:
+            config = load_agent_config(agent_dir.name)
+        except Exception:
+            continue
+
+        symlink = config.primary_symlink
+        if not (symlink.is_symlink() and symlink.resolve().exists()):
+            continue
+        incarnation_dir = symlink.resolve()
+
+        transcript_path = incarnation_dir / "transcript.jsonl"
+        if not transcript_path.exists():
+            continue
+
+        entries = read_entries(transcript_path)
+        start_entry = next((e for e in entries if e.get("type") == "incarnation_start"), None)
+        if not start_entry or not start_entry.get("ts"):
+            continue
+
+        try:
+            start_time = datetime.fromisoformat(start_entry["ts"].replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        age_hours = (datetime.now(timezone.utc) - start_time).total_seconds() / 3600
+        if age_hours < config.bardo.timeout_hours:
+            continue
+
+        if not _is_manas_live(config):
+            print(f"[scheduler] bardo_check: Manas not running for '{config.name}', skipping", flush=True)
+            continue
+
+        try:
+            _route_to_manas(config, {"type": "trigger_bardo", "agent": config.name})
+            triggered.append(config.name)
+            print(f"[scheduler] bardo triggered for '{config.name}' (age={age_hours:.1f}h)", flush=True)
+        except Exception as e:
+            print(f"[scheduler] bardo_check failed for '{config.name}': {e}", flush=True)
+
+    return triggered
+
+
 class SchedulerDaemon:
     """Background scheduler that fires due items. Runs as a thread inside the runtime daemon."""
 
@@ -263,31 +314,35 @@ class SchedulerDaemon:
                 self._fire_item(item, now)
 
     def _fire_item(self, item: ScheduledItem, now: datetime) -> None:
-        """Fire a scheduled item — route to Manas if live, otherwise call runtime_core directly."""
-        from . import runtime_core as _runtime
         try:
-            dispatched_via_manas = False
-            try:
-                from .config import load_agent_config
+            if item.type == "bardo_check":
+                _handle_bardo_check()
+            elif item.type == "budget_reset":
+                from ..agent.budget import reset_weekly_budgets
+                reset_weekly_budgets()
+            else:
+                # Agent-specific: route to Manas — no fallback.
+                from ..config import load_agent_config
                 from .runtime_daemon import _is_manas_live, _route_to_manas
                 config = load_agent_config(item.agent)
-                if _is_manas_live(config):
-                    _route_to_manas(config, {"type": "internal_process", **item.to_dict()})
-                    dispatched_via_manas = True
-            except Exception:
-                pass
+                if not _is_manas_live(config):
+                    raise RuntimeError(f"Manas not running for '{item.agent}'")
+                _route_to_manas(config, {
+                    "type": "internal_process",
+                    "agent": item.agent,
+                    "hook_type": item.type,
+                    "goal": item.goal,
+                    "payload": item.payload or {},
+                    "rebirth_from": item.rebirth_from,
+                })
 
-            if not dispatched_via_manas:
-                _runtime.process_scheduled_item(item.to_dict())
-
-            print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})"
-                  + (" via manas" if dispatched_via_manas else ""))
+            print(f"[scheduler] Fired {item.id} for {item.agent} ({item.type})", flush=True)
             if item.recurring:
                 reschedule(item, now)
             else:
                 move_to_completed(item)
         except Exception as e:
-            print(f"[scheduler] Exception firing {item.id}: {e}")
+            print(f"[scheduler] Exception firing {item.id}: {e}", flush=True)
             move_to_failed(item, str(e))
 
     def stop(self) -> None:

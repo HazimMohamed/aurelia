@@ -35,9 +35,9 @@ _ALEMBIC_ROOT = _LAB_ROOT
 if str(_AURELIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_AURELIA_ROOT))
 
-from src.samsara.config import AGENT_HOME_BASE, AGENT_DATA_BASE
+from src.runtime.config import AGENT_HOME_BASE, AGENT_DATA_BASE
 from src.agent.budget import compute_cost
-from src.samsara.provisioning import SeedKarma
+from src.runtime.provisioning import SeedKarma
 from src.sandbox.sandbox import SandboxAgent, acquire_sandbox_agent, release_sandbox_agent
 from src.agent.transcript import read_entries
 from src.agent.context import build_system_prompt
@@ -190,7 +190,7 @@ class AureliaExperiment:
                     shutil.rmtree(dst)
                 shutil.copytree(src, dst, symlinks=True)
 
-        # Restore samsara-managed data (memory, akasha)
+        # Restore runtime-managed data (memory, akasha)
         for d in ["memory", "akasha"]:
             src = snapshot_dir / "data" / d
             dst = config.data_dir / d
@@ -214,7 +214,7 @@ class AureliaExperiment:
         run_dir.mkdir(parents=True, exist_ok=True)
         self.cold_storage_dir = run_dir
 
-        # 1. Snapshot — both agent workspace and samsara data
+        # 1. Snapshot — both agent workspace and runtime data
         snapshot_dir = run_dir / "snapshot"
         if snapshot_dir.exists():
             shutil.rmtree(snapshot_dir)

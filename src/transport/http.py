@@ -21,11 +21,11 @@ from pydantic import BaseModel, model_validator
 
 from .client import client as runtime
 from ..agent.hooks import HookType
-from ..samsara.config import AgentConfig, GLOBAL_CONFIG_PATH
-from ..samsara.scheduler import (
+from ..config import AgentConfig, GLOBAL_CONFIG_PATH
+from ..runtime.scheduler import (
     ScheduledItem,
-    ALLOWED_TYPES,
-    JANITOR_ONLY_TYPES,
+    INFRA_TYPES,
+    AGENT_TYPES,
     write_scheduled_item,
     count_pending_for_agent,
     _parse_when,
@@ -54,7 +54,7 @@ def _get_agent_config(agent_name: str) -> Optional[AgentConfig]:
     """Load an AgentConfig from the registry via the daemon."""
     # We use the config module directly for auth — it's read-only filesystem access
     # and doesn't need to go through the daemon.
-    from ..samsara.config import AGENT_DATA_BASE, load_agent_config
+    from ..config import AGENT_DATA_BASE, load_agent_config
     try:
         agent_json = AGENT_DATA_BASE / agent_name / "agent.json"
         if not agent_json.exists():
@@ -589,25 +589,24 @@ def internal_schedule(
     req: ScheduleRequest,
     agent: Optional[AgentConfig] = Depends(_authenticate_agent),
 ) -> dict:
-    """Schedule a work item. Agents call this to schedule future incarnations."""
-    all_allowed = ALLOWED_TYPES | JANITOR_ONLY_TYPES
-    if req.type not in all_allowed:
+    """Schedule a work item. Agents can only schedule AGENT_TYPES for themselves."""
+    all_known = INFRA_TYPES | AGENT_TYPES
+    if req.type not in all_known:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown type '{req.type}'. Allowed: {sorted(ALLOWED_TYPES)}",
+            detail=f"Unknown type '{req.type}'. Agent-schedulable: {sorted(AGENT_TYPES)}",
         )
 
-    if req.type in JANITOR_ONLY_TYPES:
-        if agent is None or agent.name != "janitor":
+    if req.type in INFRA_TYPES:
+        if agent is not None:
             raise HTTPException(
                 status_code=403,
-                detail="Janitor-only type requires authenticated Janitor agent",
+                detail=f"Type '{req.type}' is infra-only and cannot be scheduled by agents",
             )
 
     is_janitor = agent is not None and agent.name == "janitor"
-    is_invite = req.type == "agent_invite"
-    if req.agent != (agent.name if agent else req.agent):
-        if not is_janitor and not is_invite:
+    if agent is not None and req.agent != agent.name:
+        if not is_janitor:
             raise HTTPException(
                 status_code=403,
                 detail="Agents can only schedule tasks for themselves",
@@ -676,7 +675,7 @@ def internal_registry_reload() -> dict:
 @app.get("/scheduler/pending")
 def get_scheduler_pending(agent: Optional[str] = None) -> dict:
     """List pending scheduled items, optionally filtered by agent."""
-    from ..samsara.scheduler import load_pending_items
+    from ..runtime.scheduler import load_pending_items
 
     items = load_pending_items()
     if agent:

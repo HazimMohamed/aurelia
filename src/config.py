@@ -9,9 +9,9 @@ from typing import Optional
 
 GLOBAL_CONFIG_PATH = Path("/var/aurelia/config.json")
 AGENT_HOME_BASE = Path("/home")                # agent-owned workspace root
-AGENT_DATA_BASE = Path("/var/aurelia/agents")  # samsara-managed data root
+AGENT_DATA_BASE = Path("/var/aurelia/agents")  # runtime-managed data root
 AGENT_RUN_BASE  = Path("/var/aurelia/run")     # agent-owned runtime state (sockets, pids)
-DHARMA_DIR = Path(__file__).parent.parent.parent / "dharma"
+CONSTITUTION_DIR = Path(__file__).parent.parent / "constitution"
 
 # Model IDs
 MODEL_HAIKU = "claude-haiku-4-5-20251001"
@@ -66,14 +66,14 @@ class AgentConfig:
     def __post_init__(self) -> None:
         self.home = AGENT_HOME_BASE / self.name
 
-    # ── Samsara-managed data (under AGENT_DATA_BASE) ───────────────────────────
+    # ── Runtime-managed data (under AGENT_DATA_BASE) ──────────────────────────
 
     @property
     def data_dir(self) -> Path:
         return AGENT_DATA_BASE / self.name
 
     @property
-    def karma_dir(self) -> Path:
+    def memory_dir(self) -> Path:
         return self.data_dir / "memory"
 
     @property
@@ -82,23 +82,15 @@ class AgentConfig:
 
     @property
     def primary_symlink(self) -> Path:
-        return self.karma_dir / "primary"
+        return self.memory_dir / "primary"
 
     @property
-    def episodic_extended_dir(self) -> Path:
-        return self.karma_dir / "episodic" / "extended"
+    def memory_core_path(self) -> Path:
+        return self.memory_dir / "core.jsonl"
 
     @property
-    def episodic_core_dir(self) -> Path:
-        return self.karma_dir / "episodic" / "core"
-
-    @property
-    def semantic_core_path(self) -> Path:
-        return self.karma_dir / "semantic" / "core.jsonl"
-
-    @property
-    def semantic_extended_dir(self) -> Path:
-        return self.karma_dir / "semantic" / "extended"
+    def memory_extended_dir(self) -> Path:
+        return self.memory_dir / "extended"
 
     # ── Manas runtime state (under AGENT_RUN_BASE) ────────────────────────────
 
@@ -121,8 +113,8 @@ class AgentConfig:
         return self.home / "room"
 
     @property
-    def dharma_dir(self) -> Path:
-        return self.home / "dharma"
+    def constitution_dir(self) -> Path:
+        return self.home / "constitution"
 
     @property
     def identity_dir(self) -> Path:
@@ -130,7 +122,7 @@ class AgentConfig:
 
     @property
     def identity_path(self) -> Path:
-        return self.dharma_dir / "identity.md"
+        return self.constitution_dir / "identity.md"
 
 
 def load_global_config() -> dict:

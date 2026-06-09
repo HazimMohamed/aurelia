@@ -22,7 +22,8 @@ from src.transport.client import RuntimeClient  # noqa: E402
 client = RuntimeClient()
 
 AGENT = "personal"
-AGENT_HOME = Path("/home") / AGENT
+from src.config import AGENT_DATA_BASE
+AGENT_DATA_DIR = AGENT_DATA_BASE / AGENT
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -111,8 +112,8 @@ def test_goldfish(runtime):
 def test_bardo_memory_persistence(runtime):
     """Tell agent a real personal fact, trigger bardo, spawn new incarnation, ask for it.
 
-    Tests the full karma pipeline:
-      dispatch → memory_write (semantic_core) → bardo → new incarnation context → recall
+    Tests the full memory pipeline:
+      dispatch → memory_write (core) → bardo → new incarnation context → recall
 
     We tell the agent something that genuinely matters to serving Hazim well,
     so it has real motivation to store it — not an arbitrary test token.
@@ -134,12 +135,12 @@ def test_bardo_memory_persistence(runtime):
     )
     _print_response(r1)
 
-    semantic_core = AGENT_HOME / "karma" / "semantic" / "core.jsonl"
-    core_text = semantic_core.read_text() if semantic_core.exists() else ""
+    memory_core = AGENT_DATA_DIR / "memory" / "core.jsonl"
+    core_text = memory_core.read_text() if memory_core.exists() else ""
     if "Kuala Lumpur" in core_text:
-        print("\n  ✓ Fact written to semantic core immediately (Path 1 confirmed)")
+        print("\n  ✓ Fact written to memory core immediately (Path 1 confirmed)")
     else:
-        print("\n  ~ Not yet in semantic core — bardo will need to consolidate it")
+        print("\n  ~ Not yet in memory core — bardo will need to consolidate it")
 
     print("\n  Triggering bardo...")
     bardo_result = client.trigger_bardo(AGENT)
@@ -161,8 +162,8 @@ def test_bardo_memory_persistence(runtime):
         print("\n  ✓ New incarnation recalled the fact: Kuala Lumpur")
     else:
         print("\n  ✗ Fact not found in new incarnation's response")
-        core_text = semantic_core.read_text() if semantic_core.exists() else "(empty)"
-        print(f"  Semantic core:\n{core_text[:500]}")
+        core_text = memory_core.read_text() if memory_core.exists() else "(empty)"
+        print(f"  Memory core:\n{core_text[:500]}")
         pytest.fail(f"Fact not recalled by new incarnation after bardo")
 
 
@@ -176,7 +177,7 @@ def test_bardo_smart_gate(runtime):
     """
     incarnation = _reset_and_spawn()
 
-    akasha = AGENT_HOME / "akasha"
+    akasha = AGENT_DATA_DIR / "akasha"
     files_before = set(akasha.rglob("*.jsonl")) if akasha.exists() else set()
     print(f"\n  Akasha files before: {len(files_before)}")
     print("  Expected: no new episodic file after a trivial exchange.\n")
@@ -206,40 +207,40 @@ def test_bardo_smart_gate(runtime):
         pytest.xfail("Bardo archived a trivial session — LLM classification is non-deterministic")
 
 
-def test_memory_write_semantic_core(runtime):
-    """Ask agent to write to semantic_core, verify the file is updated.
+def test_memory_write_core(runtime):
+    """Ask agent to write to core tier, verify memory/core.jsonl is updated immediately.
 
     Tests the immediate Path 1 write in handle_memory_write.
-    Expected: karma/semantic/core.jsonl contains the written content.
+    Expected: memory/core.jsonl contains the written content.
     """
     FACT = "Hazim's favourite number is 42"
 
     incarnation = _reset_and_spawn()
 
-    semantic_core = AGENT_HOME / "karma" / "semantic" / "core.jsonl"
-    content_before = semantic_core.read_text() if semantic_core.exists() else ""
+    memory_core = AGENT_DATA_DIR / "memory" / "core.jsonl"
+    content_before = memory_core.read_text() if memory_core.exists() else ""
 
-    print(f"\n  Asking agent to write to semantic_core: {FACT!r}")
-    print("  Expected: karma/semantic/core.jsonl updated immediately after the call.\n")
+    print(f"\n  Asking agent to write to memory core: {FACT!r}")
+    print("  Expected: memory/core.jsonl updated immediately after the call.\n")
 
     r = _dispatch(
         incarnation,
         f"Please use memory_write to store this fact: '{FACT}'. "
-        f"Use tier=semantic_core and importance=high.",
+        f"Use tier=core and importance=high.",
     )
     _print_response(r)
 
-    content_after = semantic_core.read_text() if semantic_core.exists() else ""
+    content_after = memory_core.read_text() if memory_core.exists() else ""
 
     if FACT in content_after:
-        print(f"\n  ✓ Fact found in semantic core: {FACT!r}")
+        print(f"\n  ✓ Fact found in memory core: {FACT!r}")
     elif content_after != content_before:
-        print(f"\n  ~ Semantic core was updated but exact fact not found")
+        print(f"\n  ~ Memory core was updated but exact fact not found")
         print(f"  New content: {content_after[len(content_before):][:300]}")
         # Partial pass — something was written, just not verbatim
     else:
-        print(f"\n  ✗ Semantic core unchanged after memory_write call")
-        pytest.fail("memory_write with tier=semantic_core did not update core.jsonl")
+        print(f"\n  ✗ Memory core unchanged after memory_write call")
+        pytest.fail("memory_write with tier=core did not update core.jsonl")
 
 
 def test_dashboard_notification(runtime):

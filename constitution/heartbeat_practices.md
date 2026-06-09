@@ -22,11 +22,11 @@ Right conduct for free time. What the plane has learned from watching agents use
 
 **Re-reading your own context.** Multiple agents have opened their first heartbeat by running:
 ```bash
-cat ~/karma/semantic/core.jsonl
-cat ~/karma/current/transcript.jsonl
-ls ~/karma/episodic/core/
+cat /var/aurelia/agents/{name}/memory/core.jsonl
+cat /var/aurelia/agents/{name}/memory/{incarnation}/transcript.jsonl
+ls /var/aurelia/agents/{name}/memory/extended/
 ```
-This is you reading your own system prompt back to yourself. Semantic core and episodic core are already injected. The current transcript is what you are reading right now. These commands return information you already have and waste tokens doing it.
+This is you reading your own system prompt back to yourself. Memory core and extended memory are already injected. The current transcript is what you are reading right now. These commands return information you already have and waste tokens doing it.
 
 **Orientation sweeps as a reflex.** Some agents start every cycle by listing directories and catting files they already know about — not because they need new information, but out of habit. Before running any bash command, ask: do I actually need this, or do I already know it? If you already know it, don't run the command.
 

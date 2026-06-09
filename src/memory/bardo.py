@@ -1,4 +1,4 @@
-"""Bardo process: summarize transcript, process memory flags, archive to Akasha, clean karma."""
+"""Bardo process: summarize transcript, process memory flags, archive to Akasha."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import anthropic
 
-from ..samsara.config import AgentConfig
+from ..config import AgentConfig
 from ..agent.transcript import (
     read_entries,
     append_entry,
@@ -183,9 +183,9 @@ def _handoff_primary_if_needed(agent_config: AgentConfig, incarnation_name: str)
         return
 
     others = [
-        d for d in agent_config.karma_dir.iterdir()
+        d for d in agent_config.memory_dir.iterdir()
         if d.is_dir()
-        and d.name not in (incarnation_name, "episodic", "semantic")
+        and d.name not in (incarnation_name, "extended")
         and (d / "transcript.jsonl").exists()
     ]
     if others:
@@ -214,11 +214,11 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     6. Copy scratch to ~/akasha/ if non-empty
     7. Write bardo_complete to transcript (before copy)
     8. Remove current symlink
-    9. Clean karma incarnation folder
+    9. Clean incarnation folder
     """
-    from .memory import write_semantic_core, write_semantic_extended
+    from .memory import write_memory_core, write_memory_extended
 
-    incarnation_dir = agent_config.karma_dir / incarnation_name
+    incarnation_dir = agent_config.memory_dir / incarnation_name
     transcript_path = incarnation_dir / "transcript.jsonl"
     scratch_dir = incarnation_dir / "scratch"
 
@@ -267,7 +267,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         agent_config.bardo.model,
     )
 
-    episodic_dir = agent_config.episodic_extended_dir
+    episodic_dir = agent_config.memory_extended_dir
     episodic_dir.mkdir(parents=True, exist_ok=True)
     episodic_path = episodic_dir / f"{incarnation_name}.jsonl"
 
@@ -294,18 +294,17 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
             "incarnation": incarnation_name,
             "bardo_processed": True,
         }
-        tier = flag.get("tier", "semantic")
-        if tier == "semantic_core":
-            # Write to semantic core with lock (may already be written during cycle)
-            # Bardo re-confirms it's there — idempotent since we check content
-            _ensure_semantic_core(agent_config, flag_entry)
-        elif tier in ("semantic", "semantic_extended"):
-            write_semantic_extended(
+        tier = flag.get("tier", "extended")
+        if tier == "core":
+            # Idempotent — bardo re-confirms it's present after live cycle wrote it
+            _ensure_memory_core(agent_config, flag_entry)
+        elif tier == "extended":
+            write_memory_extended(
                 agent_config,
                 flag.get("category", "general"),
                 flag_entry,
             )
-        # episodic tier flags are captured in the episodic summary above
+        # other tiers are ignored — no episodic/semantic split exists anymore
 
     # 3. Extract additional semantic insights (bardo-initiated, catches unflagged)
     if cycle_count > 0:
@@ -326,7 +325,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
                 "source": "bardo",
             }
             if insight_entry["content"]:
-                write_semantic_extended(
+                write_memory_extended(
                     agent_config,
                     insight.get("category", "general"),
                     insight_entry,
@@ -357,7 +356,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
         symlink.unlink()
 
-    # 8. Clean karma incarnation folder
+    # 8. Clean incarnation folder
     shutil.rmtree(incarnation_dir)
 
     return {
@@ -370,22 +369,18 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     }
 
 
-def _ensure_semantic_core(config: AgentConfig, entry: dict[str, Any]) -> None:
-    """
-    Ensure a semantic_core entry is in the core file.
-    Avoids duplicating entries already written during the live cycle.
-    """
-    from .memory import read_jsonl, write_semantic_core
+def _ensure_memory_core(config: AgentConfig, entry: dict[str, Any]) -> None:
+    """Ensure a core entry exists; avoids duplicating what the live cycle already wrote."""
+    from .memory import read_jsonl, write_memory_core
 
-    existing = read_jsonl(config.semantic_core_path)
+    existing = read_jsonl(config.memory_core_path)
     content = entry.get("content", "")
 
-    # Check for duplicate content
     for e in existing:
         if e.get("content", "") == content:
             return  # Already present
 
-    write_semantic_core(config, entry)
+    write_memory_core(config, entry)
 
 
 def check_bardo_timeouts(registry: Any) -> list[str]:
@@ -408,7 +403,7 @@ def check_bardo_timeouts(registry: Any) -> list[str]:
             continue
 
         # Find incarnation start time from transcript
-        incarnation_dir = config.karma_dir / active_name
+        incarnation_dir = config.memory_dir / active_name
         transcript_path = incarnation_dir / "transcript.jsonl"
 
         if not transcript_path.exists():

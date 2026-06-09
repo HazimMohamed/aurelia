@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .config import AGENT_DATA_BASE, AgentConfig, load_agent_config, list_known_agents
+from ..config import AGENT_DATA_BASE, AgentConfig, load_agent_config, list_known_agents
 from ..agent.incarnation import get_primary_incarnation
 from ..agent.transcript import read_entries
 
@@ -85,7 +85,7 @@ class AgentRegistry:
             }
 
         # Load current incarnation state
-        incarnation_dir = config.karma_dir / active_incarnation
+        incarnation_dir = config.memory_dir / active_incarnation
         transcript_path = incarnation_dir / "transcript.jsonl"
         entries = read_entries(transcript_path)
         cycle = sum(1 for e in entries if e.get("type") == "human_message")

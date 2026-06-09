@@ -159,43 +159,13 @@ JANITOR_ONLY_TYPES = {
 ### High Priority
 
 **Remove `next_action` / `continue_task` Pattern**
-- **Why:** Vestigial. Agents don't control their own lifecycle anymore — bardo is externally imposed.
-- **What:** Delete `_extract_next_action` in `src/agent/core.py`, remove `continue_task` tool
-- **Impact:** Simplifies agent response handling, removes confusing unused feature
-- **Commit:** TBD
-
-**Rename `src/samsara/` → `src/runtime/`**
-- **Why:** "Samsara" (cycle of suffering) has negative connotation, contradicts philosophy
-- **What:** Rename folder, update all imports and docs
-- **Impact:** Codebase-wide refactor, breaks some imports temporarily
-- **Commit:** TBD
-
-**Update Terminology**
-- **Dharma → Constitution:** Already done in paths (`/constitution/`), finish in docs
-- **Karma → Memory:** Already done in code (`config.memory_dir`), finish in docs/comments
-- **Keep:** Incarnation, Bardo, Akashic (these work well)
-- **Impact:** Documentation clarity, reduced cognitive overhead
-- **Commit:** TBD
+- Vestigial. Agents don't control their own lifecycle anymore — bardo is externally imposed.
+- Delete `_extract_next_action` in `src/agent/core.py`, remove `continue_task` tool
 
 ### Medium Priority
 
 **Clarify/Remove `transport_group` References**
-- **Why:** With Manas, transport_group is less relevant — Manas processes run as agent users
-- **What:** Audit permission model, update docs to reflect Manas-based architecture
-- **Impact:** Documentation accuracy, possibly simplify Linux setup
-- **Commit:** TBD
-
-**Remove FIFO Queue References (if obsolete)**
-- **Why:** Legacy from M2 when we had separate per-agent daemon processes
-- **What:** If fully replaced by Manas sockets, remove FIFO code and docs
-- **Impact:** Simplifies codebase, removes unused code paths
-- **Commit:** TBD
-
-**Document Manas Architecture Properly**
-- **Why:** Manas is the current execution model but underdocumented
-- **What:** Add detailed Manas section to DESIGN.md (done), ensure all examples use Manas paths
-- **Impact:** Developer onboarding, system comprehension
-- **Commit:** TBD (partially done in DESIGN.md v2.0)
+- With Manas, `transport_group` is less relevant — Manas processes run as agent users. Audit and simplify.
 
 ### Low Priority
 
@@ -273,5 +243,5 @@ These are exploratory, not committed roadmap items:
 
 ---
 
-**Last Updated:** 2026-06-05
-**Current Focus:** M4 (Discord + Dashboard + Plaid)
+**Last Updated:** 2026-06-09
+**Current Focus:** M3.5 remaining items, then M4 (Discord + Dashboard + Plaid)

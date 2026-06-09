@@ -12,7 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..samsara.runtime_core import (
+from ..runtime.types import (
     AgentResponse,
     AgentSummary,
     HealthReport,
@@ -60,7 +60,6 @@ class RuntimeClient:
             incarnation=data["incarnation"],
             cycle=data["cycle"],
             content=data["content"],
-            next_action=data.get("next_action", {}),
         )
 
     def get_history(self, agent: str, incarnation: str) -> list[TranscriptEntry]:

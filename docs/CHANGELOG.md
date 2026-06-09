@@ -4,6 +4,53 @@ A chronological record of what's been built.
 
 ---
 
+## M3.5 Architecture Cleanup — **COMPLETE** (2026-06)
+
+**Commits:** `58914c2`, `79166d5`
+
+**Delivered:** Runtime reduced to a pure router. Manas elevated to a proper package and sole agent execution engine. Admin concerns cleanly separated from runtime. CLI thinned to a transport wrapper.
+
+### Runtime as Pure Router
+
+**`src/manas/` package** — replaces `src/runtime/manas.py`
+- `manas/agent.py` — all agent execution logic (spawn, dispatch, bardo, history, process_hook, reset_budget). Never imports from `runtime_core`. Runs as agent user with natural permissions.
+- `manas/process.py` — Manas socket server; receives dispatches from runtime daemon, calls `manas/agent.*`
+
+**`src/runtime/runtime_core.py` gutted** — agent execution functions removed entirely. Now only holds registry, health, and budget queries. Manas is the sole execution engine.
+
+**`src/runtime/runtime_daemon.py` rewritten** — clean `_PER_AGENT_TYPES` set; per-agent requests forwarded to Manas or hard-error (no fallback). Daemon handles system-level ops directly.
+
+**`src/runtime/types.py`** — shared dataclasses (`IncarnationSummary`, `AgentResponse`, `AgentSummary`, `HealthReport`, `TranscriptEntry`) extracted to prevent circular imports.
+
+### Neutral Config Module
+
+**`src/config.py`** — elevated from `src/runtime/config.py`. Sits above both `src/runtime/` and `src/admin/`; neither depends on the other. Adjusted `CONSTITUTION_DIR` path depth.
+
+### Admin Package
+
+**`src/admin/`** — setup-time and provisioning concerns, extracted from CLI.
+- `admin/system.py` — `setup()`, `reprovision()`, `uninstall()`, each returning `list[StepResult]`. No console output; caller formats results.
+- `admin/provisioning.py` — `create_agent`, `destroy_agent`, `create_ephemeral_agent`, `reset_agent` (moved from `src/runtime/provisioning.py`).
+
+### CLI Thinning
+
+`cmd_system_setup`, `cmd_system_reprovision`, `cmd_system_uninstall` now delegate to `src/admin/system.*`. `cmd_reset` now delegates to `admin/provisioning.reset_agent()`.
+
+### Bug Fixes
+
+- **Incarnation dir permissions** — `_chown` ran before `_standup_agent` created files. Fixed: second `_chown` call after `_standup_agent` in `create_agent` and `create_ephemeral_agent`.
+- **`manas.sock` group** — run_dir lacked setgid bit. Fixed: `chmod 2750` on run_dir so socket inherits `aurelia_admin` group.
+- **`internal_process` routing** — `{"type": "internal_process", **item.to_dict()}` overwrote `type`. Fixed: explicit `hook_type` field.
+- **`save_budget` chmod** — `0o460` (owner read-only) prevented Manas from writing after first save. Fixed: `0o660`.
+
+### Terminology / Rename (Complete)
+
+- `src/samsara/` → `src/runtime/`
+- Scheduler type whitelist split into `INFRA_TYPES` + `AGENT_TYPES`
+- `dharma/` → `constitution/`
+
+---
+
 ## Milestone 3: Memory and Bardo (MVP) — **COMPLETE** (2026-06)
 
 **Commit:** `90c1b59` and prior
@@ -170,4 +217,4 @@ A chronological record of what's been built.
 
 ---
 
-**Last Updated:** 2026-06-05
+**Last Updated:** 2026-06-09
