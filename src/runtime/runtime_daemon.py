@@ -159,11 +159,23 @@ def _now_iso() -> str:
 
 
 def _require_admin_uid(uid: int) -> None:
-    """Only root or the aurelia service account may perform admin operations."""
-    own_uid = os.getuid()
-    if uid == 0 or uid == own_uid:
+    """Only root or members of aurelia_admin may perform admin operations."""
+    import grp
+    if uid == 0:
         return
-    raise PermissionError(f"UID {uid} is not permitted to perform admin operations")
+    try:
+        admin_gid = grp.getgrnam("aurelia_admin").gr_gid
+        import pwd
+        username = pwd.getpwuid(uid).pw_name
+        # Check both the group's member list and the user's primary group
+        in_admin = (
+            username in grp.getgrnam("aurelia_admin").gr_mem
+            or pwd.getpwuid(uid).pw_gid == admin_gid
+        )
+    except (KeyError, PermissionError):
+        in_admin = False
+    if not in_admin:
+        raise PermissionError(f"UID {uid} is not a member of aurelia_admin")
 
 
 def _require_agent_uid(uid: int, claimed_agent: str) -> None:
