@@ -536,7 +536,7 @@ src/
 
 ### 4.4 The Runtime Interface
 
-Everything the plane can do is expressed as a function on the runtime. Those functions live in `src/samsara/runtime_core.py` and are exposed over a Unix-domain socket by `src/samsara/runtime_daemon.py`.
+Everything the plane can do is expressed as a function on the runtime. Those functions live in `src/runtime/runtime_core.py` and are exposed over a Unix-domain socket by `src/runtime/runtime_daemon.py`.
 
 **Per-agent operations** (forwarded to Manas — runtime never executes them directly):
 
@@ -964,7 +964,7 @@ aurelia status --once
 aurelia stop
 ```
 
-Under the hood, `aurelia start` spawns `python3 -m src.samsara.runtime_daemon` and records its PID in `/var/aurelia/pids/runtime.pid`.
+Under the hood, `aurelia start` spawns `python3 -m src.runtime.runtime_daemon` and records its PID in `/var/aurelia/pids/runtime.pid`.
 
 ### 8.2 Talking to Agents
 

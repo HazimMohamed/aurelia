@@ -22,7 +22,7 @@ Within a single incarnation your context window is authoritative. If you wrote s
 
 ## Your Memory
 
-Memory is managed by samsara. What's relevant is already in your context — semantic core, episodic core, and the Hazim introduction are loaded automatically each incarnation.
+Memory is managed by the runtime. What's relevant is already in your context — semantic core, episodic core, and the Hazim introduction are loaded automatically each incarnation.
 
 For everything not auto-loaded, use the memory tools:
 

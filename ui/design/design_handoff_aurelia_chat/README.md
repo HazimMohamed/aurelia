@@ -182,7 +182,7 @@ Same shell as Chat, but the body is `ComingSoonRail`:
 - Logs stubs: all streams / errors / tool calls / model i/o / audit
 - Below: a dashed 8px-radius "COMING SOON" plaque on `var(--bg-elevated)`, mono 10 / .18em / muted-soft / centered
 
-Search input, `＋ new`, and the regular footer are hidden in these views. Footer text becomes `samsara · not yet wired` / `logs · not yet wired`.
+Search input, `＋ new`, and the regular footer are hidden in these views. Footer text becomes `runtime · not yet wired` / `logs · not yet wired`.
 
 #### Rail — Collapsed (56px)
 Always shows the **Chat-default minimized view**, regardless of which top-level view is active:
