@@ -96,6 +96,7 @@ def _bwrap_cmd(
         "--proc", "/proc",
         "--tmpfs", "/tmp",
 
+        "--setenv", "HOME", str(agent_config.home),
         "--chdir", str(cwd),
         "--",
         "/bin/bash", "-c", command,

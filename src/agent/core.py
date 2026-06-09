@@ -66,7 +66,7 @@ def run_agent_cycle(
     entries = incarnation_state["entries"]
     cycle = incarnation_state["cycle"] + 1
 
-    system_prompt = build_system_prompt(config, hook_content=human_content)
+    system_prompt = build_system_prompt(config, hook_content=human_content, incarnation_name=incarnation_state.get("name", ""))
     messages = build_hook_messages(config, entries, human_content, hook_type)
 
     write_human_message(transcript_path, human_content, cycle, sender=sender)

@@ -20,12 +20,12 @@ def _read_file_safe(path: Path) -> str:
     return ""
 
 
-def _render_plane(config: AgentConfig) -> str:
+def _render_plane(config: AgentConfig, incarnation_name: str = "") -> str:
     """Load plane.md and substitute agent-specific path variables."""
     template = _read_file_safe(CONSTITUTION_DIR / "plane.md")
     if not template:
         return ""
-    scratch_dir = config.memory_dir / "current" / "scratch"
+    scratch_dir = config.scratch_dir / incarnation_name if incarnation_name else config.scratch_dir
     replacements = {
         "{agent_name}": config.name.capitalize(),
         "{memory_dir}": str(config.memory_dir),
@@ -38,7 +38,7 @@ def _render_plane(config: AgentConfig) -> str:
     return template
 
 
-def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
+def build_system_prompt(config: AgentConfig, hook_content: str = "", incarnation_name: str = "") -> str:
     """
     Build full system prompt:
     plane + identity + character files + semantic core + episodic core +
@@ -52,7 +52,7 @@ def build_system_prompt(config: AgentConfig, hook_content: str = "") -> str:
     parts = []
 
     # 1. The plane — universal mechanics, rendered with agent-specific paths
-    plane = _render_plane(config)
+    plane = _render_plane(config, incarnation_name=incarnation_name)
     if plane:
         parts.append(plane)
 
