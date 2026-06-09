@@ -59,7 +59,7 @@ def build_tool_registry(
     register_core_tools(registry, agent_config, incarnation_state)
 
     # bash_exec: blocking commands; process_*: background/persistent processes
-    register_exec_tools(registry, agent_config)
+    register_exec_tools(registry, agent_config, incarnation_name=incarnation_state.get("name", "unknown"))
     register_process_tools(registry, agent_config, incarnation=incarnation_state.get("name", "unknown"))
 
     # Memory access tools (curated — no raw bash paths to runtime dirs needed)
