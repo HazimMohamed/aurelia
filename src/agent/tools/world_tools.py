@@ -41,34 +41,53 @@ def _fetch(url: str) -> str:
 
 
 def _arxiv() -> list[dict[str, str]]:
-    cats = "cat:cs+OR+cat:physics+OR+cat:q-bio+OR+cat:astro-ph+OR+cat:math+OR+cat:econ"
-    url = (
-        "http://export.arxiv.org/api/query"
-        f"?search_query={cats}"
-        "&sortBy=submittedDate&sortOrder=descending"
-        f"&max_results={_ARXIV_KEEP}"
-    )
-    root = ET.fromstring(_fetch(url))
-    ns = {"a": "http://www.w3.org/2005/Atom"}
+    # RSS feeds contain genuinely new submissions from the most recent batch
+    # The query API sorts by original submission date and returns years-old papers
+    categories = ["cs", "physics", "q-bio", "astro-ph", "math", "econ"]
     results = []
-    for entry in root.findall("a:entry", ns):
-        title_el = entry.find("a:title", ns)
-        id_el = entry.find("a:id", ns)
-        pub_el = entry.find("a:published", ns)
-        cat_el = entry.find("{http://arxiv.org/schemas/atom}primary_category")
+    seen: set[str] = set()
 
-        title = (title_el.text or "").strip().replace("\n", " ")
-        url_val = (id_el.text or "").strip()
-        submitted = (pub_el.text or "")[:10]
-        category = cat_el.get("term", "") if cat_el is not None else ""
+    def fetch_cat(cat: str) -> list[dict[str, str]]:
+        items = []
+        try:
+            root = ET.fromstring(_fetch(f"https://arxiv.org/rss/{cat}"))
+            channel = root.find("channel")
+            if channel is None:
+                return items
+            for item in channel.findall("item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                title = (title_el.text or "").strip().replace("\n", " ")
+                url_val = (link_el.text or "").strip()
+                # category from tag attribute or just use the feed cat
+                dc_subject = item.find("{http://purl.org/dc/elements/1.1/}subject")
+                category = (dc_subject.text or cat) if dc_subject is not None else cat
+                if title and url_val:
+                    items.append({"title": title, "url": url_val, "category": category})
+        except Exception:
+            pass
+        return items
 
-        if title and url_val:
-            results.append({
-                "title": title,
-                "url": url_val,
-                "category": category,
-                "submitted": submitted,
-            })
+    per_cat = max(2, _ARXIV_KEEP // len(categories))
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(fetch_cat, cat): cat for cat in categories}
+        per_cat_results: dict[str, list] = {}
+        for future in as_completed(futures):
+            cat = futures[future]
+            per_cat_results[cat] = future.result()[:per_cat]
+
+    # Interleave: one from each category in rotation
+    slots = [per_cat_results.get(cat, []) for cat in categories]
+    i = 0
+    while len(results) < _ARXIV_KEEP and any(slots):
+        bucket = slots[i % len(slots)]
+        if bucket:
+            item = bucket.pop(0)
+            if item["url"] not in seen:
+                seen.add(item["url"])
+                results.append(item)
+        i += 1
+
     return results
 
 
