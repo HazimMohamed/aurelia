@@ -1137,6 +1137,41 @@ def cmd_agent_bardo(name: str) -> None:
     console.print()
 
 
+@cmd_agent.command("heartbeat")
+@click.argument("name")
+def cmd_agent_heartbeat(name: str) -> None:
+    """Force a heartbeat for an agent's primary incarnation."""
+    if not _require_runtime():
+        return
+
+    console.print(f"\n  [bold]Heartbeat: {escape(name)}[/bold]")
+
+    ok, data = _socket_call({
+        "type": "internal_process",
+        "agent": name,
+        "hook_type": "heartbeat",
+        "goal": "",
+        "payload": {},
+    })
+    if not ok:
+        console.print(f"  [red]✗ Heartbeat failed:[/red] {data}\n")
+        return
+
+    if isinstance(data, dict):
+        status = data.get("status", "unknown")
+        reason = data.get("reason", "")
+        incarnation = data.get("incarnation", "")
+        if status == "skipped":
+            console.print(f"  [yellow]~ Skipped[/yellow] [dim]{reason}[/dim]\n")
+        elif status == "ok":
+            console.print(f"  [green]✓ Heartbeat complete[/green]")
+            if incarnation:
+                console.print(f"    incarnation: [dim]{escape(incarnation)}[/dim]")
+        else:
+            console.print(f"  [dim]{status}[/dim]")
+    console.print()
+
+
 # ── aurelia agent create / destroy ───────────────────────────────────────────
 
 @cmd_agent.command("create")
