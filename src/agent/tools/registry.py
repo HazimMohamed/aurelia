@@ -52,6 +52,7 @@ def build_tool_registry(
     from .comms_tools import register_comms_tools
     from .agent_tools import register_agent_tools
     from .memory_tools import register_memory_tools
+    from .world_tools import register_world_tools
 
     registry = ToolRegistry()
 
@@ -68,6 +69,9 @@ def build_tool_registry(
     # Communication tools for most hooks
     if hook_type in ("human_message", "heartbeat", "scheduled_task", "agent_invite"):
         register_comms_tools(registry, agent_config, incarnation_state)
+
+    # World snapshot — available on all hooks
+    register_world_tools(registry)
 
     # Agent-specific tools
     register_agent_tools(
