@@ -190,7 +190,7 @@ def build_hook_prompt(
     payload: dict,
     rebirth_from: Optional[str] = None,
 ) -> str:
-    from ..agent.context import load_episodic_extended, load_recent_episodic_summary
+    from ..agent.context import load_episodic_extended
     from ..agent.hooks import (
         HookType,
         format_agent_invite,
@@ -199,12 +199,7 @@ def build_hook_prompt(
     )
 
     if hook_type == HookType.HEARTBEAT:
-        parts = []
-        episodic_context = load_recent_episodic_summary(config)
-        if episodic_context:
-            parts.append(episodic_context)
-        parts.append(format_heartbeat_prompt(config))
-        return "\n\n".join(parts)
+        return format_heartbeat_prompt(config)
 
     if hook_type == HookType.SCHEDULED_TASK:
         parts = []

@@ -21,7 +21,7 @@ from ..runtime.types import (
 )
 from ..agent.hooks import HookType
 
-SOCKET_PATH = Path("/var/aurelia/runtime.sock")
+SOCKET_PATH = Path("/var/aurelia/run/runtime.sock")
 
 
 class RuntimeClient:

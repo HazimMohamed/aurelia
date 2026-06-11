@@ -4,6 +4,44 @@ A chronological record of what's been built.
 
 ---
 
+## Incarnation Continuity & Infrastructure Cleanup — **COMPLETE** (2026-06)
+
+**Commits:** `f740ca3`
+
+**Delivered:** Heartbeats now run in the existing primary incarnation with full context. Incarnation state machine. Run/logs directory split. Dispatch routing fix.
+
+### Incarnation State Machine
+
+- New `src/agent/incarnation_state.py` — `inactive / active / exploring` states per incarnation
+- State persisted to `data_dir/states.json` (single file, all incarnations for an agent)
+- `effective_status()` treats `active` as `inactive` after 60-minute threshold
+- Heartbeats skip if primary incarnation is `active`; run in place if `inactive`; set `exploring` while running
+- Per-incarnation `threading.Lock` in Manas prevents concurrent dispatch + heartbeat transcript writes — non-blocking, bounces with error if busy
+- Stale `exploring` states reset to `inactive` on Manas startup (crash recovery)
+- Bardo calls `remove_state()` at all exit paths to keep `states.json` clean
+
+### Heartbeat Continuity
+
+- Heartbeats now run in the existing primary incarnation instead of spawning fresh
+- Full prior conversation context is already loaded — no cold-start memory retrieval needed
+- Heartbeat prompt injected as the latest human turn, identical to a normal dispatch
+- Eliminates incarnation accumulation from old spawn-per-heartbeat behavior
+
+### Infrastructure
+
+- `runtime.sock` and `runtime.pid` consolidated under `run/` — was at top-level and `pids/` respectively
+- `manas.log` moved from `run/{agent}/` to `logs/{agent}/` — persistent across restarts (append mode)
+- `logs/` is durable; `run/` is ephemeral (sockets + pids only)
+- `manas_log` property added to `AgentConfig`
+
+### Bug Fixes
+
+- **Dispatch routing**: CLI was reading wrong key (`active` vs `primary`) from `get_active` response — every `aurelia message` spawned a fresh incarnation instead of routing to primary
+- **Scratch in memory dir**: `spawn_incarnation` was still creating legacy `memory/{incarnation}/scratch/`; removed. Bardo updated to read scratch from correct `home/scratch/{incarnation}/` path
+- **`states.json` cleanup**: Bardo now removes incarnation entry at all three exit paths (empty, not worth consolidating, complete)
+
+---
+
 ## Post-M3.5 Hardening — **COMPLETE** (2026-06)
 
 **Commits:** `86e5d90`–`b1f9284`

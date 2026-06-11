@@ -26,6 +26,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from ..config import AGENT_RUN_BASE, load_agent_config
 from ..agent.hooks import HookType
+from ..agent.incarnation import load_incarnation
+from ..agent.incarnation_state import (
+    IncarnationStatus,
+    effective_status,
+    read_state,
+    write_state,
+)
 from . import agent as manas_agent
 
 
@@ -48,6 +55,28 @@ class Manas:
         self.config = load_agent_config(agent_name)
         self._shutting_down = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix=f"manas-{agent_name}")
+        self._incarnation_locks: dict[str, threading.Lock] = {}
+        self._locks_mu = threading.Lock()
+
+    def _get_lock(self, incarnation: str) -> threading.Lock:
+        with self._locks_mu:
+            if incarnation not in self._incarnation_locks:
+                self._incarnation_locks[incarnation] = threading.Lock()
+            return self._incarnation_locks[incarnation]
+
+    def _reset_stale_exploring(self) -> None:
+        """On startup reset any incarnations left in 'exploring' — Manas died mid-heartbeat."""
+        from ..agent.incarnation_state import _read_all, _write_all
+        with self._locks_mu:  # no incarnation threads running yet, but be explicit
+            states = _read_all(self.config)
+            changed = False
+            for name, entry in states.items():
+                if entry.get("status") == IncarnationStatus.EXPLORING:
+                    entry["status"] = IncarnationStatus.INACTIVE
+                    changed = True
+                    print(f"[manas:{self.name}] Reset stale exploring state for '{name}'", flush=True)
+            if changed:
+                _write_all(self.config, states)
 
     def run(self) -> None:
         run_dir = AGENT_RUN_BASE / self.name
@@ -60,6 +89,7 @@ class Manas:
             socket_path.unlink()
 
         pid_path.write_text(str(os.getpid()))
+        self._reset_stale_exploring()
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
@@ -122,22 +152,35 @@ class Manas:
 
                 if is_streaming:
                     conn.settimeout(None)
+                    incarnation = request["incarnation"]
 
                     def send_frame(frame: dict) -> None:
                         conn.sendall(json.dumps(frame).encode() + b"\n")
 
+                    lock = self._get_lock(incarnation)
+                    if not lock.acquire(blocking=False):
+                        send_frame({
+                            "type": "done", "status": "error",
+                            "error": "IncarnationBusy",
+                            "message": "Agent is currently exploring — try again shortly",
+                        })
+                        return
+
                     try:
                         result = manas_agent.dispatch(
                             config=self.config,
-                            incarnation=request["incarnation"],
+                            incarnation=incarnation,
                             hook=HookType(request["hook"]),
                             payload=request.get("payload", {}),
                             stream_callback=send_frame,
                         )
+                        write_state(self.config, incarnation, IncarnationStatus.ACTIVE)
                         send_frame({"type": "done", "status": "ok", "data": _serialize(result)})
                     except Exception as exc:
                         send_frame({"type": "done", "status": "error",
                                     "error": type(exc).__name__, "message": str(exc)})
+                    finally:
+                        lock.release()
                     return
 
                 try:
@@ -166,12 +209,21 @@ class Manas:
                     make_primary=request.get("make_primary"),
                 )
             case "dispatch":
-                return manas_agent.dispatch(
-                    config=self.config,
-                    incarnation=request["incarnation"],
-                    hook=HookType(request["hook"]),
-                    payload=request.get("payload", {}),
-                )
+                incarnation = request["incarnation"]
+                lock = self._get_lock(incarnation)
+                if not lock.acquire(blocking=False):
+                    raise RuntimeError("Agent is currently exploring — try again shortly")
+                try:
+                    result = manas_agent.dispatch(
+                        config=self.config,
+                        incarnation=incarnation,
+                        hook=HookType(request["hook"]),
+                        payload=request.get("payload", {}),
+                    )
+                    write_state(self.config, incarnation, IncarnationStatus.ACTIVE)
+                    return result
+                finally:
+                    lock.release()
             case "get_history":
                 return manas_agent.get_history(
                     config=self.config,
@@ -190,9 +242,12 @@ class Manas:
                     return {"status": "no_active", "agent": self.config.name}
                 return manas_agent.trigger_bardo(self.config, primary)
             case "internal_process":
+                hook_type = request.get("hook_type", "")
+                if hook_type == HookType.HEARTBEAT:
+                    return self._handle_heartbeat()
                 return manas_agent.process_hook(
                     config=self.config,
-                    hook_type=request["hook_type"],
+                    hook_type=hook_type,
                     goal=request.get("goal", ""),
                     payload=request.get("payload") or {},
                     rebirth_from=request.get("rebirth_from"),
@@ -201,6 +256,47 @@ class Manas:
                 return manas_agent.reset_budget(self.config)
             case _:
                 raise ValueError(f"Unknown request type: {req_type!r}")
+
+    def _handle_heartbeat(self) -> dict:
+        """Run heartbeat in the primary incarnation if it's inactive."""
+        from ..agent.hooks import heartbeat_precheck
+
+        primary = manas_agent.get_primary(self.config)
+        if not primary:
+            return {"status": "skipped", "reason": "no_primary", "agent": self.config.name}
+
+        lock = self._get_lock(primary)
+        if not lock.acquire(blocking=False):
+            return {"status": "skipped", "reason": "incarnation_busy", "agent": self.config.name}
+
+        try:
+            status = effective_status(self.config, primary)
+            if status == IncarnationStatus.ACTIVE:
+                return {"status": "skipped", "reason": "incarnation_active", "agent": self.config.name,
+                        "incarnation": primary}
+
+            if not heartbeat_precheck(self.config):
+                return {"status": "skipped", "reason": "precheck_failed", "agent": self.config.name}
+
+            write_state(self.config, primary, IncarnationStatus.EXPLORING)
+            incarnation_state = load_incarnation(self.config, primary)
+            prompt = manas_agent.build_hook_prompt(self.config, HookType.HEARTBEAT, "", {})
+            manas_agent.run_hook(self.config, HookType.HEARTBEAT, prompt, incarnation_state)
+            write_state(self.config, primary, IncarnationStatus.ACTIVE)
+            return {
+                "status": "ok",
+                "agent": self.config.name,
+                "incarnation": primary,
+                "hook": "heartbeat",
+            }
+        except Exception:
+            try:
+                write_state(self.config, primary, IncarnationStatus.INACTIVE)
+            except Exception:
+                pass
+            raise
+        finally:
+            lock.release()
 
 
 def main() -> None:

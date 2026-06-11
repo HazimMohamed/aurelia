@@ -12,7 +12,7 @@ import socket
 from pathlib import Path
 from typing import Any
 
-SOCKET_PATH = Path("/var/aurelia/runtime.sock")
+SOCKET_PATH = Path("/var/aurelia/run/runtime.sock")
 
 
 def send_runtime_request(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:

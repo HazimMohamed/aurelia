@@ -106,7 +106,7 @@ def _route_to_manas_stream(config: Any, request: dict, send_frame: Any) -> Any:
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-SOCKET_PATH = Path("/var/aurelia/runtime.sock")
+SOCKET_PATH = Path("/var/aurelia/run/runtime.sock")
 LOG_PATH = Path("/var/aurelia/logs/runtime.log")
 SOCKET_GROUP = "transport_group"
 SOCKET_MODE_PROD = 0o660

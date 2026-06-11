@@ -94,17 +94,11 @@ def spawn_incarnation(config: AgentConfig, make_primary: bool = False) -> str:
     """Create a new incarnation directory, write start entry, optionally set as primary."""
     incarnation_name = generate_incarnation_name(config.name, config.memory_dir)
     incarnation_dir = config.memory_dir / incarnation_name
-    scratch_dir = incarnation_dir / "scratch"
 
     incarnation_dir.mkdir(parents=True, exist_ok=True)
-    scratch_dir.mkdir(parents=True, exist_ok=True)
 
     transcript_path = incarnation_dir / "transcript.jsonl"
     write_incarnation_start(transcript_path, incarnation_name, cycle=0)
-
-    # Give the agent write access to scratch; transcript stays aurelia-owned
-    import subprocess as _sp
-    _sp.run(["chown", config.name, str(scratch_dir)], capture_output=True)
 
     if make_primary:
         symlink = config.primary_symlink

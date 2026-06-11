@@ -174,6 +174,14 @@ def _worth_archiving(entries: list[dict[str, Any]]) -> bool:
     return len(non_start) > 0
 
 
+def _remove_incarnation_state(agent_config: AgentConfig, incarnation_name: str) -> None:
+    try:
+        from ..agent.incarnation_state import remove_state
+        remove_state(agent_config, incarnation_name)
+    except Exception:
+        pass
+
+
 def _handoff_primary_if_needed(agent_config: AgentConfig, incarnation_name: str) -> None:
     """If the incarnation being bardo'd is primary, promote another or spawn fresh."""
     from ..agent.incarnation import set_primary_incarnation, spawn_incarnation
@@ -220,7 +228,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
 
     incarnation_dir = agent_config.memory_dir / incarnation_name
     transcript_path = incarnation_dir / "transcript.jsonl"
-    scratch_dir = incarnation_dir / "scratch"
+    scratch_dir = agent_config.scratch_dir / incarnation_name
 
     if not incarnation_dir.exists():
         return {"status": "error", "message": f"Incarnation dir not found: {incarnation_dir}"}
@@ -235,6 +243,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
             symlink.unlink()
         shutil.rmtree(incarnation_dir)
+        _remove_incarnation_state(agent_config, incarnation_name)
         return {"status": "skipped", "reason": "empty incarnation", "incarnation": incarnation_name}
 
     # Write bardo_complete to transcript before archiving
@@ -257,6 +266,7 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
         if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
             symlink.unlink()
         shutil.rmtree(incarnation_dir)
+        _remove_incarnation_state(agent_config, incarnation_name)
         return {"status": "archived", "reason": "not worth consolidating", "incarnation": incarnation_name}
 
     # 1. Summarize → episodic/extended
@@ -356,8 +366,9 @@ def run_bardo(agent_config: AgentConfig, incarnation_name: str) -> dict[str, Any
     if symlink.is_symlink() and symlink.resolve().name == incarnation_name:
         symlink.unlink()
 
-    # 8. Clean incarnation folder
+    # 8. Clean incarnation folder and state entry
     shutil.rmtree(incarnation_dir)
+    _remove_incarnation_state(agent_config, incarnation_name)
 
     return {
         "status": "complete",

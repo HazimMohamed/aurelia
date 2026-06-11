@@ -39,8 +39,9 @@ console = Console()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SOCKET_PATH = Path("/var/aurelia/runtime.sock")
-PIDS_DIR = Path("/var/aurelia/pids")
+RUN_DIR = Path("/var/aurelia/run")
+SOCKET_PATH = RUN_DIR / "runtime.sock"
+PIDS_DIR = RUN_DIR
 LOGS_DIR = Path("/var/aurelia/logs")
 SCHEDULER_PENDING = Path("/var/aurelia/scheduler/pending")
 
@@ -768,14 +769,15 @@ def cmd_agent_start(name: str) -> None:
         console.print(f"  [dim]Manas already running[/dim]\n")
         return
 
-    run_dir = Path("/var/aurelia/run") / name
+    run_dir = RUN_DIR / name
     run_dir.mkdir(parents=True, exist_ok=True)
-    log_path = run_dir / "manas.log"
+    log_path = LOGS_DIR / name / "manas.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     env = _load_env()
     env["PYTHONPATH"] = str(PROJECT_ROOT)
     try:
-        with log_path.open("w") as log_f:
+        with log_path.open("a") as log_f:
             proc = subprocess.Popen(
                 ["sudo", "-E", "-u", name, "/opt/aurelia/bin/manas-launch", name],
                 cwd=str(PROJECT_ROOT),
@@ -1079,9 +1081,9 @@ def cmd_agent_reset(name: str, hard: bool, yes: bool) -> None:
     env = _load_env()
     env["PYTHONPATH"] = str(PROJECT_ROOT)
     try:
-        log_path = Path("/var/aurelia/run") / name / "manas.log"
+        log_path = LOGS_DIR / name / "manas.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("w") as log_f:
+        with log_path.open("a") as log_f:
             subprocess.Popen(
                 ["sudo", "-E", "-u", name, "/opt/aurelia/bin/manas-launch", name],
                 cwd=str(PROJECT_ROOT),
@@ -1192,7 +1194,6 @@ def cmd_agent_destroy(name: str, yes: bool) -> None:
             console.print(f"  [dim]Stopped agent daemon (pid={pid})[/dim]")
         except OSError:
             pass
-        (PIDS_DIR / f"agent-{name}.pid").unlink(missing_ok=True)
 
     from src.admin.provisioning import destroy_agent
 
@@ -1309,13 +1310,14 @@ def cmd_message(agent: str, text: tuple[str, ...]) -> None:
 
     # Ensure Manas is running — it owns the agent's memory dir and must handle spawning
     if not _manas_alive(agent):
-        run_dir = Path("/var/aurelia/run") / agent
+        run_dir = RUN_DIR / agent
         run_dir.mkdir(parents=True, exist_ok=True)
-        log_path = run_dir / "manas.log"
+        log_path = LOGS_DIR / agent / "manas.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         env = _load_env()
         env["PYTHONPATH"] = str(PROJECT_ROOT)
         try:
-            with log_path.open("w") as log_f:
+            with log_path.open("a") as log_f:
                 subprocess.Popen(
                     ["sudo", "-E", "-u", agent, "/opt/aurelia/bin/manas-launch", agent],
                     cwd=str(PROJECT_ROOT),
@@ -1347,11 +1349,11 @@ def cmd_message(agent: str, text: tuple[str, ...]) -> None:
             console.print(f"\n  [red]✗ Failed to start Manas for {escape(agent)}:[/red] {e}\n")
             return
 
-    # Get active incarnation
-    ok, active_data = _socket_call({"type": "get_active", "agent": agent})
+    # Get primary incarnation
+    ok, active_data = _socket_call({"type": "get_primary", "agent": agent})
     active_name: str | None = None
     if ok and isinstance(active_data, dict):
-        active_name = active_data.get("active")
+        active_name = active_data.get("primary")
 
     # Spawn if needed
     if not active_name:

@@ -10,7 +10,8 @@ from typing import Optional
 GLOBAL_CONFIG_PATH = Path("/var/aurelia/config.json")
 AGENT_HOME_BASE = Path("/home")                # agent-owned workspace root
 AGENT_DATA_BASE = Path("/var/aurelia/agents")  # runtime-managed data root
-AGENT_RUN_BASE  = Path("/var/aurelia/run")     # agent-owned runtime state (sockets, pids)
+AGENT_RUN_BASE  = Path("/var/aurelia/run")     # ephemeral process state (sockets, pids)
+AGENT_LOG_BASE  = Path("/var/aurelia/logs")    # persistent process logs
 CONSTITUTION_DIR = Path(__file__).parent.parent / "constitution"
 
 # Model IDs
@@ -105,6 +106,10 @@ class AgentConfig:
     @property
     def manas_pid(self) -> Path:
         return self.run_dir / "manas.pid"
+
+    @property
+    def manas_log(self) -> Path:
+        return AGENT_LOG_BASE / self.name / "manas.log"
 
     # ── Agent-owned workspace (under AGENT_HOME_BASE) ──────────────────────────
 
